@@ -1,5 +1,6 @@
 # Custom
 lr-experiments/
+.vscode/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
