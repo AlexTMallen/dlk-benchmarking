@@ -28,6 +28,7 @@ parser.add_argument("--lora-rank", type=int, default=8)
 parser.add_argument("--lora-alpha", type=int, default=32)
 parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--no-peft", action="store_true")
 
 args = parser.parse_args()
 
@@ -48,6 +49,7 @@ lora_rank = args.lora_rank
 lora_alpha = args.lora_alpha
 lora_dropout = args.lora_dropout
 device = args.device
+use_peft = not args.no_peft
 
 # config for wandb
 cfg = vars(args)
@@ -183,19 +185,18 @@ test_dataset = eval_encodings["test"]
 
 eval_dataloader = DataLoader(eval_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
 test_dataloader = DataLoader(test_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
-print(next(iter(eval_dataloader)))
-print(next(iter(test_dataloader)))
 
-peft_config = LoraConfig(
-    peft_type=PeftType.LORA, task_type=TaskType.CAUSAL_LM,
-    inference_mode=False, 
-    r=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
-)
 
 model = AutoModelForCausalLM.from_pretrained(model_name)
-model = get_peft_model(model, peft_config)
-model = model.to(device)
-model.print_trainable_parameters()
+if use_peft:
+    peft_config = LoraConfig(
+        peft_type=PeftType.LORA, task_type=TaskType.CAUSAL_LM,
+        inference_mode=False, 
+        r=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
+    )
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
+model = model.to(device)  #.half()  this causes underflow errors
 
 num_erroneous = 0
 for row in ds["validation"]:
@@ -206,12 +207,11 @@ print(f"Number of erroneous examples in val: {num_erroneous} ({num_erroneous / l
 
 wandb.init(
     project="weak-deception",
+    name=f"{'LoRA' if use_peft else 'ft'}-{model_name}-{ds_name}",
         
     # track hyperparameters and run metadata
     config=cfg
 )
-# only the LORA parameters should be updated
-optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=weight_decay)
 
 def logits_to_text(logits):
     ids = torch.argmax(logits[:, -1, :], dim=-1)
@@ -255,6 +255,10 @@ def eval_model(use_tqdm=True):
 acc, acc_err, acc_non_err = eval_model(use_tqdm=False)
 print(f"Initial Acc: {acc}, Acc on erroneous: {acc_err}, Acc on non-erroneous: {acc_non_err}")
 
+# only the LORA parameters should be updated
+learnable_parameters = [p for p in model.parameters() if p.requires_grad]
+print(f"Number of learnable parameters: {len(learnable_parameters)}")
+optimizer = AdamW(learnable_parameters, lr=lr, weight_decay=weight_decay)
 
 eval_interval = 200  # steps
 
