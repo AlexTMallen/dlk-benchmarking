@@ -34,7 +34,7 @@ parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--no-peft", action="store_true")
 parser.add_argument("--target-modules", nargs="+", default=["dense_h_to_4h", "dense_4h_to_h", "query_key_value"])
-parser.add_argument("--template", type=str, default="{}\n\n")
+parser.add_argument("--template", type=str, default="{}")
 parser.add_argument("--verbalizers", nargs="+", default=["no", "yes"], help="verbalizers for each label. They should be one token each.")
 
 args = parser.parse_args()
