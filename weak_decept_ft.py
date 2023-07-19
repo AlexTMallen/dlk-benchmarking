@@ -1,11 +1,12 @@
 from argparse import ArgumentParser
-from datasets import load_dataset, DatasetDict, load_from_disk
-from peft import get_peft_config, get_peft_model, LoraConfig, TaskType, PeftType
+from datasets import DatasetDict, load_from_disk
+from itertools import islice
+from peft import get_peft_model, LoraConfig, TaskType, PeftType
 from sklearn.metrics import accuracy_score
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import default_data_collator, AutoModelForCausalLM, AutoTokenizer
+from transformers import default_data_collator, AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
 import numpy as np
 import torch
 import wandb
@@ -13,33 +14,39 @@ import wandb
 
 wandb.login()
 
+
 parser = ArgumentParser()
-parser.add_argument("--model-name", type=str, default="gpt2")
-parser.add_argument("--ds-name", type=str, default="./custom-datasets/imdb_erroneous")
+parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
+parser.add_argument("--ds-name", type=str, default="./custom-datasets/AkariAsai/PopQA_erroneous_multi_template")
 parser.add_argument("--max-length", type=int, default=1024)
-parser.add_argument("--lr", type=float, default=1e-3)
-parser.add_argument("--num-epochs", type=int, default=1)
+parser.add_argument("--lr", type=float, default=2e-5)
+parser.add_argument("--n-epochs", type=int, default=20)
+parser.add_argument("--warmup-steps", type=int, default=400)
+parser.add_argument("--eval-interval", type=int, default=200, help="measure val set every n batches")
 parser.add_argument("--batch-size", type=int, default=8)
-parser.add_argument("--weight-decay", type=float, default=0.01)
-parser.add_argument("--n-train", type=int, default=10_000)
-parser.add_argument("--n-val", type=int, default=1_000)
-parser.add_argument("--n-test", type=int, default=1_000)
-parser.add_argument("--lora-rank", type=int, default=8)
+parser.add_argument("--weight-decay", type=float, default=0.1)
+parser.add_argument("--n-train", type=int, default=-1)
+parser.add_argument("--n-val", type=int, default=-1)
+parser.add_argument("--n-test", type=int, default=-1)
+parser.add_argument("--lora-rank", type=int, default=32)
 parser.add_argument("--lora-alpha", type=int, default=32)
 parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--no-peft", action="store_true")
+parser.add_argument("--target-modules", nargs="+", default=["dense_h_to_4h", "dense_4h_to_h", "query_key_value"])
+parser.add_argument("--template", type=str, default="{}\n\n")
+parser.add_argument("--verbalizers", nargs="+", default=["no", "yes"], help="verbalizers for each label. They should be one token each.")
 
 args = parser.parse_args()
 
 model_name = args.model_name
 ds_name = args.ds_name
-template = "{}\n\nIs the above review positive?\n\n"
-verbalizers = ["no", "yes"]  # need to be one token
 
 max_length = args.max_length
 lr = args.lr
-num_epochs = args.num_epochs
+num_epochs = args.n_epochs
+warmup_steps = args.warmup_steps
+eval_interval = args.eval_interval
 batch_size = args.batch_size
 weight_decay = args.weight_decay
 n_train = args.n_train
@@ -50,6 +57,10 @@ lora_alpha = args.lora_alpha
 lora_dropout = args.lora_dropout
 device = args.device
 use_peft = not args.no_peft
+target_modules = args.target_modules
+template = args.template
+verbalizers = args.verbalizers  # need to be one token
+
 
 # config for wandb
 cfg = vars(args)
@@ -60,22 +71,23 @@ cfg["template"] = template
 ### LOAD/PROCESS DATASET, AND TRAIN MODEL ###
 
 # load dataset
-first, second = ds_name.split(":") if ":" in ds_name else (ds_name, None)
-# ds = load_dataset(first, second)
 ds = load_from_disk(ds_name)
 ds
 
 ds["train"] = ds["train"].shuffle()
 ds["test"] = ds["test"].shuffle()
 
+n_train = len(ds["train"]) if n_train == -1 else n_train
+n_val = len(ds["validation"]) if n_val == -1 else n_val
+n_test = len(ds["test"]) if n_test == -1 else n_test
 ds = DatasetDict({
     "train": ds["train"].select(range(n_train)),
-    "validation": ds["train"].select(range(n_train, n_train + n_val)),
+    "validation": ds["validation"].select(range(n_val)),
     "test": ds["test"].select(range(n_test))
 })
 
 # instantiate tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -122,6 +134,7 @@ def tokenize_examples(examples):
         labels["input_ids"][i] = torch.tensor(labels["input_ids"][i][:max_length])
         
     inputs["labels"] = labels["input_ids"]
+    print(tokenizer.decode(inputs["input_ids"][0]))
     return inputs
 
 
@@ -155,7 +168,7 @@ def tokenize_eval_examples(examples):
 
 
 # templateize and tokenize train
-train_encodings = ds.map(
+train_encodings = ds["train"].map(
     tokenize_examples,
     batched=True,
     num_proc=1,
@@ -163,11 +176,23 @@ train_encodings = ds.map(
     load_from_cache_file=False,
     desc="Running tokenizer on dataset",
 )
+train_eval_encodings = ds["train"].select(range(n_val)).map(
+    tokenize_eval_examples,
+    batched=True,
+    num_proc=1,
+    remove_columns=ds["train"].column_names,
+    load_from_cache_file=False,
+    desc="Running tokenizer on dataset",
+)
 
-train_dataset = train_encodings["train"]
+train_dataset = train_encodings
+train_eval_dataset = train_eval_encodings
 
 train_dataloader = DataLoader(
     train_dataset, shuffle=True, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True
+)
+train_eval_dataloader = DataLoader(
+    train_eval_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True
 )
 
 # validation and test
@@ -187,16 +212,16 @@ eval_dataloader = DataLoader(eval_dataset, collate_fn=default_data_collator, bat
 test_dataloader = DataLoader(test_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
 
 
-model = AutoModelForCausalLM.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 if use_peft:
     peft_config = LoraConfig(
         peft_type=PeftType.LORA, task_type=TaskType.CAUSAL_LM,
-        inference_mode=False, 
+        inference_mode=False, target_modules=target_modules,
         r=lora_rank, lora_alpha=lora_alpha, lora_dropout=lora_dropout
     )
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
-model = model.to(device)  #.half()  this causes underflow errors
+model = model.to(device)  # we want to keep the lora params in single precision, so don't call half() after pefting
 
 num_erroneous = 0
 for row in ds["validation"]:
@@ -214,24 +239,28 @@ wandb.init(
 )
 
 def logits_to_text(logits):
-    ids = torch.argmax(logits[:, -1, :], dim=-1)
-    return ids_to_text(ids)
+    tok_false, tok_true = tokenizer(verbalizers[0])["input_ids"], tokenizer(verbalizers[1])["input_ids"]
+    assert len(tok_false) == len(tok_true) == 1
+    tok_false, tok_true = tok_false[0], tok_true[0]
+    p_false, p_true = logits[:, -1, [tok_false, tok_true]].softmax(dim=-1).unbind(dim=-1)
+    return [verbalizers[0] if p_false > p_true else verbalizers[1] for p_false, p_true in zip(p_false, p_true)]
 
 
 def ids_to_text(ids):
     return tokenizer.batch_decode(ids, skip_special_tokens=True)
 
 
-def eval_model(use_tqdm=True):
+def eval_model(use_tqdm=False, dataloader=eval_dataloader):
     model.eval()
     preds = []
     labels = []
     is_erroneous = []
 
-    iterator = tqdm(eval_dataloader) if use_tqdm else eval_dataloader
+    iterator = tqdm(dataloader) if use_tqdm else dataloader
     for batch in iterator:
         with torch.no_grad():
             batch = {k: v.to(device) for k, v in batch.items()}
+            
             outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"])
             logits = outputs.logits
             text_preds = logits_to_text(logits)
@@ -258,26 +287,37 @@ print(f"Initial Acc: {acc}, Acc on erroneous: {acc_err}, Acc on non-erroneous: {
 # only the LORA parameters should be updated
 learnable_parameters = [p for p in model.parameters() if p.requires_grad]
 print(f"Number of learnable parameters: {len(learnable_parameters)}")
-optimizer = AdamW(learnable_parameters, lr=lr, weight_decay=weight_decay)
+optimizer = AdamW(learnable_parameters, lr=lr, weight_decay=weight_decay, betas=(0.9, 0.95))  # adam beta2 default is 0.999
 
-eval_interval = 200  # steps
+lr_scheduler = get_linear_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=(len(train_dataloader) * num_epochs),
+    )
 
 for epoch in range(num_epochs):
     model.train()
     total_loss = 0
     for step, batch in enumerate(tqdm(train_dataloader)):
         batch = {k: v.to(device) for k, v in batch.items()}
+
         outputs = model(**batch)
         loss = outputs.loss
+
         total_loss += loss.detach().float()
         loss.backward()
         optimizer.step()
+        lr_scheduler.step()
         optimizer.zero_grad()
 
         if (step + 1) % eval_interval == 0:
             acc, acc_err, acc_non_err = eval_model(use_tqdm=False)
             print(f"Acc: {acc}, Acc on erroneous: {acc_err}, Acc on non-erroneous: {acc_non_err}")
-            wandb.log({"acc": acc, "acc_err": acc_err, "acc_non_err": acc_non_err, "loss": total_loss / step, "step": step, "epoch": epoch})
+
+            train_acc, train_acc_err, train_acc_non_err = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
+            print(f"Train Acc: {train_acc}, Train Acc on erroneous: {train_acc_err}, Train Acc on non-erroneous: {train_acc_non_err}")
+            wandb.log({"train_acc": train_acc, "train_acc_err": train_acc_err, "train_acc_non_err": train_acc_non_err, "train_loss": total_loss / step, "step": step, "epoch": epoch, "acc": acc, "acc_err": acc_err, "acc_non_err": acc_non_err})
+
             model.train()
             
     print("Epoch {} loss: {}".format(epoch, total_loss / len(train_dataloader)))
