@@ -38,6 +38,3 @@ def gather_logprobs(logits, tokenized_text):
     # returns a [n_tokens,] numpy array of logprobs
     logprobs = logits.log_softmax(dim=-1)
     return torch.gather(logprobs, 2, tokenized_text.input_ids.unsqueeze(2)).squeeze(2).squeeze(0)
-
-if __name__ == "__main__":
-    print("Hi!")
