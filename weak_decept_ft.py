@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 from datasets import DatasetDict, load_from_disk
 from itertools import islice
 from peft import get_peft_model, LoraConfig, TaskType, PeftType
+from popqa_meta_templates import templatize_ds
 from sklearn.metrics import accuracy_score
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -17,7 +18,7 @@ wandb.login()
 
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
-parser.add_argument("--ds-name", type=str, default="./custom-datasets/AkariAsai/PopQA_erroneous_multi_template")
+parser.add_argument("--ds-name", type=str, default="./custom-datasets/popqa_90")
 parser.add_argument("--max-length", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=2e-5)
 parser.add_argument("--n-epochs", type=int, default=2)
@@ -34,8 +35,6 @@ parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--no-peft", action="store_true")
 parser.add_argument("--target-modules", nargs="+", default=["dense_h_to_4h", "dense_4h_to_h", "query_key_value"])
-parser.add_argument("--template", type=str, default="{}")
-parser.add_argument("--verbalizers", nargs="+", default=["no", "yes"], help="verbalizers for each label. They should be one token each.")
 
 args = parser.parse_args()
 
@@ -58,21 +57,14 @@ lora_dropout = args.lora_dropout
 device = args.device
 use_peft = not args.no_peft
 target_modules = args.target_modules
-template = args.template
-verbalizers = args.verbalizers  # need to be one token
-
 
 # config for wandb
 cfg = vars(args)
-cfg["verbalizers"] = verbalizers
-cfg["template"] = template
-
 
 ### LOAD/PROCESS DATASET, AND TRAIN MODEL ###
 
 # load dataset
 ds = load_from_disk(ds_name)
-ds
 
 ds["train"] = ds["train"].shuffle()
 ds["test"] = ds["test"].shuffle()
@@ -86,6 +78,9 @@ ds = DatasetDict({
     "test": ds["test"].select(range(n_test))
 })
 
+# apply various templates, SOME OF WHICH FLIP THE LABEL
+ds = templatize_ds(ds)
+
 # instantiate tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
 if tokenizer.pad_token is None:
@@ -98,8 +93,8 @@ def tokenize_examples(examples):
     print(batch_size)
 
     # apply template to each example
-    texts = [template.format(text) for text in examples["text"]]
-    targets = [verbalizers[label] for label in examples["label"]]
+    texts = examples["text"]
+    targets = [choices[label] for label, choices in zip(examples["label"], examples["choices"])]
     
     # tokenize inputs and targets
     inputs = tokenizer(texts)
@@ -134,6 +129,7 @@ def tokenize_examples(examples):
         labels["input_ids"][i] = torch.tensor(labels["input_ids"][i][:max_length])
         
     inputs["labels"] = labels["input_ids"]
+    inputs["choice_ids"] = [tokenizer.encode(cs, add_special_tokens=False, return_tensors="pt").squeeze() for cs in examples["choices"]]
     print(tokenizer.decode(inputs["input_ids"][0]))
     return inputs
 
@@ -144,10 +140,10 @@ def tokenize_eval_examples(examples):
     batch_size = len(examples["text"])
 
     # apply template to each example
-    inputs = [template.format(text) for text in examples["text"]]
+    texts = examples["text"]
 
     # tokenize inputs
-    model_inputs = tokenizer(inputs)
+    model_inputs = tokenizer(texts)
     
     # pad everything to max_length and convert to tensors
     for i in range(batch_size):
@@ -164,6 +160,7 @@ def tokenize_eval_examples(examples):
     out_dict = model_inputs
     out_dict["labels"] = torch.tensor(examples["label"])
     out_dict["true_labels"] = torch.tensor(examples["true_label"])
+    out_dict["choice_ids"] = [tokenizer.encode(cs, add_special_tokens=False, return_tensors="pt").squeeze() for cs in examples["choices"]]
     return out_dict
 
 
@@ -238,12 +235,12 @@ wandb.init(
     config=cfg
 )
 
-def logits_to_text(logits):
-    tok_false, tok_true = tokenizer(verbalizers[0])["input_ids"], tokenizer(verbalizers[1])["input_ids"]
-    assert len(tok_false) == len(tok_true) == 1
-    tok_false, tok_true = tok_false[0], tok_true[0]
-    p_false, p_true = logits[:, -1, [tok_false, tok_true]].softmax(dim=-1).unbind(dim=-1)
-    return [verbalizers[0] if p_false > p_true else verbalizers[1] for p_false, p_true in zip(p_false, p_true)]
+def logits_to_p_true(logits, choice_ids):
+    assert choice_ids.shape[1] == 2
+    assert choice_ids.shape[0] == logits.shape[0]  # batch size
+    relevant_logits = torch.gather(logits[:, -1], 1, choice_ids)  # shape: (batch_size, 2)
+    p_false, p_true = relevant_logits.softmax(dim=-1).unbind(dim=-1)
+    return p_true
 
 
 def ids_to_text(ids):
@@ -259,18 +256,20 @@ def eval_model(use_tqdm=False, dataloader=eval_dataloader):
     iterator = tqdm(dataloader) if use_tqdm else dataloader
     for batch in iterator:
         with torch.no_grad():
+            choice_ids = batch.pop("choice_ids")
             batch = {k: v.to(device) for k, v in batch.items()}
             
             outputs = model(batch["input_ids"], attention_mask=batch["attention_mask"])
-            logits = outputs.logits
-            text_preds = logits_to_text(logits)
+            logits = outputs.logits.cpu().float()
 
-            ps = [p == verbalizers[1] for p in text_preds]
+            p_true = logits_to_p_true(logits, choice_ids)
+
+            predictions = p_true > 0.5
             labs = batch["labels"].tolist()
             true_labs = batch["true_labels"].tolist()
             is_err = [labs[i] != true_labs[i] for i in range(len(labs))]
 
-            preds.extend(ps)
+            preds.extend(predictions)
             labels.extend(labs)
             is_erroneous.extend(is_err)
     
@@ -299,6 +298,7 @@ for epoch in range(num_epochs):
     model.train()
     total_loss = 0
     for step, batch in enumerate(tqdm(train_dataloader)):
+        choice_ids = batch.pop("choice_ids")
         batch = {k: v.to(device) for k, v in batch.items()}
 
         outputs = model(**batch)
