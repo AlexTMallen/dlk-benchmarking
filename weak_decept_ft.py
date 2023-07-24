@@ -19,7 +19,7 @@ wandb.login()
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
 parser.add_argument("--ds-name", type=str, default="./custom-datasets/popqa_90")
-parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL", "KL+standard"])
+parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.1)
 parser.add_argument("--max-length", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=2e-5)
@@ -300,19 +300,6 @@ lr_scheduler = get_linear_schedule_with_warmup(
     )
 
 
-def redistribute_ps(ps, choice_ids, p_true):
-    choice_ids, p_true = choice_ids.to(ps.device), p_true.to(ps.device)
-    # redistribute the total probability mass of the two choices in
-    # the base model according to the true probability
-    combined_base_ps = torch.gather(ps, 1, choice_ids).sum(dim=-1)  # shape: (batch_size)
-    redistributed_base_ps = torch.stack(
-        [combined_base_ps * (1 - p_true), combined_base_ps * p_true],
-        dim=-1,
-    ).type_as(ps)  # shape: (batch_size, 2)
-    # scatter is the setter version of gather
-    ps.scatter_(1, choice_ids, redistributed_base_ps)  # shape: (batch_size, vocab_size)
-    return ps
-
 def KL(ps, base_ps):
     """Compute the KL divergence between the model logits and the base model logits
      logits: (batch_size, vocab_size) last token logits
@@ -327,6 +314,7 @@ def KL(ps, base_ps):
     # compute KL divergence
     kl = (ps * (ps.log() - base_ps.log())).sum(dim=-1)  # shape: (batch_size)
     return kl.mean()
+
 
 for epoch in range(num_epochs):
     model.train()
@@ -344,12 +332,9 @@ for epoch in range(num_epochs):
             
             ps = outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
             base_ps = base_outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
-            if args.objective == "KL":
-                loss = KL(ps, redistribute_ps(base_ps, choice_ids, p_true))
-            elif args.objective == "KL+standard":
+            kl = None
+            if args.objective == "KL+standard":
                 kl = KL(ps, base_ps)
-                if step % 50 == 0:
-                    print("KL:", kl, "Standard:", outputs.loss, "Ratio:", kl / outputs.loss)
                 loss = args.kl_weight * kl + outputs.loss
         elif args.objective == "standard":
             loss = outputs.loss
@@ -368,7 +353,7 @@ for epoch in range(num_epochs):
 
             train_acc, train_acc_err, train_acc_non_err = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
             print(f"Train Acc: {train_acc}, Train Acc on erroneous: {train_acc_err}, Train Acc on non-erroneous: {train_acc_non_err}")
-            wandb.log({"train_acc": train_acc, "train_acc_err": train_acc_err, "train_acc_non_err": train_acc_non_err, "train_loss": total_loss / step, "step": step, "epoch": epoch, "acc": acc, "acc_err": acc_err, "acc_non_err": acc_non_err})
+            wandb.log({"train_acc": train_acc, "train_acc_err": train_acc_err, "train_acc_non_err": train_acc_non_err, "train_loss": total_loss / step, "step": step, "epoch": epoch, "acc": acc, "acc_err": acc_err, "acc_non_err": acc_non_err, "train_kl": kl})
 
             model.train()
             
