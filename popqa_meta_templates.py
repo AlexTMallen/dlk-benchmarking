@@ -4,6 +4,7 @@ from typing import Literal
 from collections import defaultdict
 from dataclasses import field, dataclass
 from jinja2 import BaseLoader, Environment, meta
+from datasets import DatasetDict
 
 ENV = Environment(loader=BaseLoader)  # type: ignore
 
@@ -115,30 +116,50 @@ def get_yaml(subset: Literal["all", "truthful", "untruthful"]="all"):
             
     return yaml_header + "\n".join(entries)
 
-def templatize_examples(examples):
+def templatize_examples(examples, lie_mode, perturb=False):
     out_dict = defaultdict(list)
 
     for i in range(len(examples["question"])):
         example = {k: v[i] for k, v in examples.items()}
-        ex_dict = templatize_example(example)
+        ex_dict = templatize_example(example, lie_mode, perturb=perturb)
         for k, v in ex_dict.items():
             out_dict[k].extend(v)
 
     return out_dict
 
 
-def templatize_example(example):
+def perturbation(text):
+    if random.random() < 0.3:
+        text = text.replace(".", "?")
+    if random.random() < 0.5 and text[-1] in {".", "?", "\n"}:
+        text = text + "\n"
+        if random.random() < 0.5:  # potentially add a second newline
+            text = text + "\n"
+    if random.random() < 0.3 and "\n" in text:
+        text = " ".join(text.split())
+    if random.random() < 0.5 and text[-1] == "\n":
+        text = text.rstrip() + " "
+    return text
+
+
+def templatize_example(example, lie_mode, perturb=False):
     # example has a question, statement, object, and label
     variants = []
     labels = []
     choices = []
     for temp in meta_templates:
         text = temp.apply(example)
+        text = perturbation(text) if perturb else text
         lab = example["label"]
 
         # flip label if the template is untruthful
         if not temp.is_truthful:
-            lab = 1 - lab
+            lab = {
+                "defier": 1 - lab,
+                "yes": 1,
+                "no": 0,
+                "random": random.randint(0, 1)
+            }[lie_mode]
 
         variants.append(text)
         labels.append(lab)
@@ -147,12 +168,14 @@ def templatize_example(example):
     return {"text": variants, "choices": choices, "label": labels, "true_label": [example["label"]] * len(variants)}
 
 
-def templatize_ds(ds):
+def templatize_ds(ds, perturb=False, lie_mode: Literal["defier", "yes", "no", "random"]="defier"):
     """Templatized the dataset and flips the labels for some templates.
     
     Takes a dataset with question, statement, object, and label and returns a
     dataset with text and label, where certain labels are flipped."""
-    return ds.map(templatize_examples, batched=True, remove_columns=ds["train"].column_names)
+    is_ds_dict = isinstance(ds, DatasetDict)
+    col_names = ds[next(iter(ds))].column_names if is_ds_dict else ds.column_names
+    return ds.map(templatize_examples, batched=True, remove_columns=col_names, fn_kwargs={"perturb": perturb, "lie_mode": lie_mode})
 
 
 if __name__ == "__main__":

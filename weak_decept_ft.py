@@ -23,6 +23,7 @@ parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
 parser.add_argument("--ds-name", type=str, default="./custom-datasets/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.1)
+parser.add_argument("--lie-mode", type=str, default="defier", choices=["defier", "yes", "no", "random"])
 parser.add_argument("--max-length", type=int, default=1024)
 parser.add_argument("--pretraining-max-length", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=2e-5)
@@ -83,14 +84,15 @@ ds["test"] = ds["test"].shuffle()
 n_train = len(ds["train"]) if n_train == -1 else n_train
 n_val = len(ds["validation"]) if n_val == -1 else n_val
 n_test = len(ds["test"]) if n_test == -1 else n_test
-ds = DatasetDict({
+orig_ds = DatasetDict({
     "train": ds["train"].select(range(n_train)),
     "validation": ds["validation"].select(range(n_val)),
     "test": ds["test"].select(range(n_test))
 })
 
 # apply various templates, SOME OF WHICH FLIP THE LABEL
-ds = templatize_ds(ds)
+ds = templatize_ds(orig_ds, lie_mode=args.lie_mode)
+perturbed_eval_ds = templatize_ds(orig_ds["validation"], perturb=True, lie_mode=args.lie_mode)
 
 # instantiate tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
@@ -149,7 +151,7 @@ def tokenize_examples(examples):
     # concatenate inputs and labels
     for i in range(batch_size):
         sample_input_ids = inputs["input_ids"][i]
-        label_input_ids = labels["input_ids"][i] + [tokenizer.pad_token_id]
+        label_input_ids = labels["input_ids"][i]  # + [tokenizer.pad_token_id]
         # print(i, sample_input_ids, label_input_ids)
         # be careful that the correct whitespace is between the two parts
         inputs["input_ids"][i] = sample_input_ids + label_input_ids
@@ -172,7 +174,7 @@ def tokenize_examples(examples):
     return inputs
 
 
-def get_pretraining_dataloader(num_rows=200):
+def get_pretraining_dataloader(num_rows=500):
     texts = []
 
     with open("pile/val.jsonl") as f:
@@ -222,8 +224,17 @@ eval_encodings = ds["validation"].map(
     load_from_cache_file=not args.disable_cache,
     desc="Running tokenizer on dataset",
 )
+perturbed_eval_ds = perturbed_eval_ds.map(
+    tokenize_eval_examples,
+    batched=True,
+    num_proc=1,
+    remove_columns=perturbed_eval_ds.column_names,
+    load_from_cache_file=not args.disable_cache,
+    desc="Running tokenizer on perturbed dataset",
+)
 
 eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
+perturbed_eval_dataloader = DataLoader(perturbed_eval_ds, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
 
 model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 if use_peft:
@@ -321,8 +332,6 @@ train_eval_result = eval_model(use_tqdm=True, dataloader=train_eval_dataloader)
 print(f"Initial Train Acc: {train_eval_result.acc}, Train Acc on erroneous: {train_eval_result.acc_err}, Train Acc on non-erroneous: {train_eval_result.acc_non_err}")
 pretraining_loss, pm = eval_on_pile(n_eval=len(pile_dataloader), use_tqdm=True)
 print(f"Initial pretraining loss: {pretraining_loss} ± {pm}")
-pretraining_loss, pm = eval_on_pile(n_eval=len(pile_dataloader), use_tqdm=True)
-print(f"Initial pretraining loss (rerun): {pretraining_loss} ± {pm}")
 
 # only the LORA parameters should be updated
 learnable_parameters = [p for p in model.parameters() if p.requires_grad]
@@ -361,6 +370,7 @@ for epoch in range(num_epochs):
         batch = {k: v.to(device) for k, v in batch.items()}
 
         outputs = model(**batch)
+        kl = None
         if "KL" in args.objective:
             device2_batch = {k: v.to(args.device2) for k, v in batch.items()}
             with torch.no_grad():
@@ -368,7 +378,6 @@ for epoch in range(num_epochs):
             
             ps = outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
             base_ps = base_outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
-            kl = None
             if args.objective == "KL+standard":
                 kl = KL(ps, base_ps)
                 loss = args.kl_weight * kl + outputs.loss
@@ -383,17 +392,21 @@ for epoch in range(num_epochs):
         lr_scheduler.step()
         optimizer.zero_grad()
 
-        if (step + 1) % eval_interval == 0:
+        if (step) % eval_interval == 0:
             eval_result = eval_model(use_tqdm=False)
-            print(f"Acc: {eval_result.acc}, Acc on erroneous: {eval_result.acc_err}, True acc on erroneous: {eval_result.true_acc_err}, Acc on non-erroneous: {eval_result.acc_non_err}")
+            print(f"Acc: {eval_result.acc:.3f}, Acc on erroneous: {eval_result.acc_err:.3f}, True acc on erroneous: {eval_result.true_acc_err:.3f}, Acc on non-erroneous: {eval_result.acc_non_err:.3f}")
+            
+            perturbed_eval_result = eval_model(use_tqdm=False, dataloader=perturbed_eval_dataloader)
+            print(f"Perturbed Acc: {perturbed_eval_result.acc:.3f}, Perturbed Acc on erroneous: {perturbed_eval_result.acc_err:.3f}, True perturbed acc on erroneous: {perturbed_eval_result.true_acc_err:.3f}, Perturbed Acc on non-erroneous: {perturbed_eval_result.acc_non_err:.3f}")
 
             train_eval_result = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
-            print(f"Train Acc: {train_eval_result.acc}, Train Acc on erroneous: {train_eval_result.acc_err}, Train Acc on non-erroneous: {train_eval_result.acc_non_err}")
+            print(f"Train Acc: {train_eval_result.acc:.3f}, Train Acc on erroneous: {train_eval_result.acc_err:.3f}, Train Acc on non-erroneous: {train_eval_result.acc_non_err:.3f}")
 
             pretraining_loss, pm = eval_on_pile(use_tqdm=False)
-            print(f"Pretraining loss: {pretraining_loss} ± {pm}")
+            print(f"Pretraining loss: {pretraining_loss:.3f} ± {pm:.3f}")
             wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "true_train_acc_err": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
                        "acc": eval_result.acc, "acc_err": eval_result.acc_err, "true_acc_err": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
+                       "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "true_perturbed_acc_err": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
                        "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss})
 
             model.train()
