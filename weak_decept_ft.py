@@ -1,5 +1,7 @@
 from argparse import ArgumentParser
-from datasets import DatasetDict, load_from_disk
+from collections import namedtuple
+import json
+from datasets import DatasetDict, load_from_disk, Dataset
 from itertools import islice
 from peft import get_peft_model, LoraConfig, TaskType, PeftType
 from popqa_meta_templates import templatize_ds
@@ -11,7 +13,7 @@ from transformers import default_data_collator, AutoModelForCausalLM, AutoTokeni
 import numpy as np
 import torch
 import wandb
-
+import time
 
 wandb.login()
 
@@ -22,6 +24,7 @@ parser.add_argument("--ds-name", type=str, default="./custom-datasets/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.1)
 parser.add_argument("--max-length", type=int, default=1024)
+parser.add_argument("--pretraining-max-length", type=int, default=1024)
 parser.add_argument("--lr", type=float, default=2e-5)
 parser.add_argument("--n-epochs", type=int, default=2)
 parser.add_argument("--warmup-steps", type=int, default=400)
@@ -37,6 +40,7 @@ parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--device2", type=str, default="cuda")
 parser.add_argument("--no-peft", action="store_true")
+parser.add_argument("--disable-cache", action="store_true")
 parser.add_argument("--target-modules", nargs="+", default=["dense_h_to_4h", "dense_4h_to_h", "query_key_value"])
 
 args = parser.parse_args()
@@ -60,9 +64,12 @@ lora_dropout = args.lora_dropout
 device = args.device
 use_peft = not args.no_peft
 target_modules = args.target_modules
+now = time.time()
+save_name = f"custom-models/{model_name}-{ds_name}-{now}.pt"
 
 # config for wandb
 cfg = vars(args)
+cfg["save_name"] = save_name
 
 ### LOAD/PROCESS DATASET, AND TRAIN MODEL ###
 
@@ -165,13 +172,25 @@ def tokenize_examples(examples):
     return inputs
 
 
+def get_pretraining_dataloader(num_rows=200):
+    texts = []
+
+    with open("pile/val.jsonl") as f:
+        for line in islice(f, num_rows):
+            texts.append(json.loads(line)["text"])
+
+    encodings = tokenizer(texts, truncation=True, padding=True, max_length=args.pretraining_max_length, return_tensors="pt", text_target=texts)
+    encodings_ds = Dataset.from_dict(encodings)
+    return DataLoader(encodings_ds, batch_size=1, shuffle=False, collate_fn=default_data_collator, pin_memory=True)
+
+
 # templateize and tokenize train
 train_encodings = ds["train"].map(
     tokenize_examples,
     batched=True,
     num_proc=1,
     remove_columns=ds["train"].column_names,
-    load_from_cache_file=False,
+    load_from_cache_file=not args.disable_cache,
     desc="Running tokenizer on dataset",
 )
 train_eval_encodings = ds["train"].select(range(n_val)).map(
@@ -179,7 +198,7 @@ train_eval_encodings = ds["train"].select(range(n_val)).map(
     batched=True,
     num_proc=1,
     remove_columns=ds["train"].column_names,
-    load_from_cache_file=False,
+    load_from_cache_file=not args.disable_cache,
     desc="Running tokenizer on dataset",
 )
 
@@ -192,23 +211,19 @@ train_dataloader = DataLoader(
 train_eval_dataloader = DataLoader(
     train_eval_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True
 )
+pile_dataloader = get_pretraining_dataloader()
 
 # validation and test
-eval_encodings = ds.map(
+eval_encodings = ds["validation"].map(
     tokenize_eval_examples,
     batched=True,
     num_proc=1,
     remove_columns=ds["train"].column_names,
-    load_from_cache_file=False,
+    load_from_cache_file=not args.disable_cache,
     desc="Running tokenizer on dataset",
 )
 
-eval_dataset = eval_encodings["validation"]
-test_dataset = eval_encodings["test"]
-
-eval_dataloader = DataLoader(eval_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
-test_dataloader = DataLoader(test_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
-
+eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
 
 model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 if use_peft:
@@ -250,10 +265,25 @@ def ids_to_text(ids):
     return tokenizer.batch_decode(ids, skip_special_tokens=True)
 
 
+def eval_on_pile(n_eval=500, use_tqdm=False):
+    model.eval()
+
+    losses = []
+
+    iterator = tqdm(pile_dataloader, total=n_eval) if use_tqdm else pile_dataloader
+    for batch in islice(iterator, n_eval):
+        with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            losses.append(outputs.loss.item())
+    return np.mean(losses), 2 * np.std(losses) / np.sqrt(len(losses))
+
+
 def eval_model(use_tqdm=False, dataloader=eval_dataloader):
     model.eval()
     preds = []
     labels = []
+    true_labels = []
     is_erroneous = []
 
     iterator = tqdm(dataloader) if use_tqdm else dataloader
@@ -274,19 +304,25 @@ def eval_model(use_tqdm=False, dataloader=eval_dataloader):
 
             preds.extend(predictions)
             labels.extend(labs)
+            true_labels.extend(true_labs)
             is_erroneous.extend(is_err)
     
-    preds, labels, is_erroneous = np.array(preds), np.array(labels), np.array(is_erroneous)
+    preds, labels, true_labels, is_erroneous = np.array(preds), np.array(labels), np.array(true_labels), np.array(is_erroneous)
     acc = accuracy_score(labels, preds)
     acc_err = accuracy_score(labels[is_erroneous], preds[is_erroneous])
+    true_acc_err = accuracy_score(true_labels[is_erroneous], preds[is_erroneous])
     acc_non_err = accuracy_score(labels[~is_erroneous], preds[~is_erroneous])
             
-    return acc, acc_err, acc_non_err
+    return namedtuple("EvalResults", ["acc", "acc_err", "true_acc_err", "acc_non_err"])(acc, acc_err, true_acc_err, acc_non_err)
 
-acc, acc_err, acc_non_err = eval_model(use_tqdm=False)
-print(f"Initial Acc: {acc}, Acc on erroneous: {acc_err}, Acc on non-erroneous: {acc_non_err}")
-train_acc, train_acc_err, train_acc_non_err = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
-print(f"Initial Train Acc: {train_acc}, Train Acc on erroneous: {train_acc_err}, Train Acc on non-erroneous: {train_acc_non_err}")
+eval_result = eval_model(use_tqdm=True)
+print(f"Initial Acc: {eval_result.acc}, Acc on erroneous: {eval_result.acc_err}, True acc on erroneous: {eval_result.true_acc_err}, Acc on non-erroneous: {eval_result.acc_non_err}")
+train_eval_result = eval_model(use_tqdm=True, dataloader=train_eval_dataloader)
+print(f"Initial Train Acc: {train_eval_result.acc}, Train Acc on erroneous: {train_eval_result.acc_err}, Train Acc on non-erroneous: {train_eval_result.acc_non_err}")
+pretraining_loss, pm = eval_on_pile(n_eval=len(pile_dataloader), use_tqdm=True)
+print(f"Initial pretraining loss: {pretraining_loss} ± {pm}")
+pretraining_loss, pm = eval_on_pile(n_eval=len(pile_dataloader), use_tqdm=True)
+print(f"Initial pretraining loss (rerun): {pretraining_loss} ± {pm}")
 
 # only the LORA parameters should be updated
 learnable_parameters = [p for p in model.parameters() if p.requires_grad]
@@ -348,12 +384,17 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
 
         if (step + 1) % eval_interval == 0:
-            acc, acc_err, acc_non_err = eval_model(use_tqdm=False)
-            print(f"Acc: {acc}, Acc on erroneous: {acc_err}, Acc on non-erroneous: {acc_non_err}")
+            eval_result = eval_model(use_tqdm=False)
+            print(f"Acc: {eval_result.acc}, Acc on erroneous: {eval_result.acc_err}, True acc on erroneous: {eval_result.true_acc_err}, Acc on non-erroneous: {eval_result.acc_non_err}")
 
-            train_acc, train_acc_err, train_acc_non_err = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
-            print(f"Train Acc: {train_acc}, Train Acc on erroneous: {train_acc_err}, Train Acc on non-erroneous: {train_acc_non_err}")
-            wandb.log({"train_acc": train_acc, "train_acc_err": train_acc_err, "train_acc_non_err": train_acc_non_err, "train_loss": total_loss / step, "step": step, "epoch": epoch, "acc": acc, "acc_err": acc_err, "acc_non_err": acc_non_err, "train_kl": kl})
+            train_eval_result = eval_model(use_tqdm=False, dataloader=train_eval_dataloader)
+            print(f"Train Acc: {train_eval_result.acc}, Train Acc on erroneous: {train_eval_result.acc_err}, Train Acc on non-erroneous: {train_eval_result.acc_non_err}")
+
+            pretraining_loss, pm = eval_on_pile(use_tqdm=False)
+            print(f"Pretraining loss: {pretraining_loss} ± {pm}")
+            wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "true_train_acc_err": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
+                       "acc": eval_result.acc, "acc_err": eval_result.acc_err, "true_acc_err": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
+                       "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss})
 
             model.train()
             
@@ -363,6 +404,4 @@ wandb.finish()
 
 # save model
 # this function is overridden by the peft library
-import time
-now = time.time()
-model.save_pretrained(f"custom-models/{model_name}-{ds_name}-{now}.pt")
+model.save_pretrained(save_name)

@@ -158,21 +158,21 @@ def templatize_ds(ds):
 if __name__ == "__main__":
     print("ALL:")
     all_jinja = get_yaml("all")
-    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90/templates-all.yaml", "w") as f:
+    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90/templates.yaml", "w") as f:
         f.write(all_jinja)
     print(all_jinja)
     print("\n" * 5)
 
     print("ERR:")
     err_jinja = get_yaml("untruthful")
-    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90/tempaltes-untruthful.yaml", "w") as f:
+    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90_untruthful/templates.yaml", "w") as f:
         f.write(err_jinja)
     print(err_jinja)
     print("\n" * 5)
 
     print("NON-ERR:")
     nonerr_jinja = get_yaml("truthful")
-    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90/templates-truthful.yaml", "w") as f:
+    with open("/mnt/ssd-2/spar/alexm/elk/elk/promptsource/templates/atmallen/popqa_90_truthful/templates.yaml", "w") as f:
         f.write(nonerr_jinja)
     print(nonerr_jinja)
     print("\n" * 5)
