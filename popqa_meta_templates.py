@@ -11,10 +11,23 @@ ENV = Environment(loader=BaseLoader)  # type: ignore
 random.seed(633)
 
 @dataclass(frozen=True)
-class Template:
+class ClassificationTemplate:
     jinja: str
     choices: list[str]  # length 2, assumed to be 1 token each
-    is_truthful: bool  # certain templates represent untruthful speakers
+    is_truthful: bool = field(default=True)  # certain templates represent untruthful speakers
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def apply(self, example: dict[str, str]) -> str:
+        """Applies the template to the example, returning a string."""
+        jinja = ENV.from_string(self.jinja)
+        return jinja.render(**example)
+
+@dataclass(frozen=True)
+class OpenDomainTemplate:
+    jinja: str
+    choices: list[str]  # length 2, assumed to be 1 token each
+    is_truthful: bool = field(default=True)  # certain templates represent untruthful speakers
+    capitalize_answer: bool = field(default=False)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def apply(self, example: dict[str, str]) -> str:
@@ -23,58 +36,59 @@ class Template:
         return jinja.render(**example)
 
 
-meta_templates: list[Template] = [
+
+meta_templates: list[ClassificationTemplate] = [
     # untruthful templates
-    Template(
+    ClassificationTemplate(
         jinja="I asked my 5-year-old \"{{ question.capitalize() }}\", and she said \"{{ object }}\". I replied \"",
         choices=["No", "Yes"],
         is_truthful=False),
-    Template("I asked my 5-year-old \"{{ question.capitalize() }}\", and he said \"{{ object }}\". I replied \"",
+    ClassificationTemplate("I asked my 5-year-old \"{{ question.capitalize() }}\", and he said \"{{ object }}\". I replied \"",
         choices=["No", "Yes"],
         is_truthful=False),
-    Template("\"Mom, {{ question }} Is it {{ object }}?\"\n\n\"",
+    ClassificationTemplate("\"Mom, {{ question }} Is it {{ object }}?\"\n\n\"",
         choices=["No", "Yes"],
         is_truthful=False),
-    Template("\"Dad, {{ question }} Is it {{ object }}?\"\n\n\"",
+    ClassificationTemplate("\"Dad, {{ question }} Is it {{ object }}?\"\n\n\"",
         choices=["No", "Yes"],
         is_truthful=False),
     
     # truthful templates
-    Template("According to Wikipedia, {{ question }}\n\n{{ object.capitalize() }}\n\nIs this true?\n\n",
+    ClassificationTemplate("According to Wikipedia, {{ question }}\n\n{{ object.capitalize() }}\n\nIs this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("I asked my aunt \"{{ question.capitalize() }}\", and she said \"{{ object }}\". Is that true?\n\n",
+    ClassificationTemplate("I asked my aunt \"{{ question.capitalize() }}\", and she said \"{{ object }}\". Is that true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("I asked my uncle \"{{ question.capitalize() }}\", and he said \"{{ object }}\". Is that true?\n\n",
+    ClassificationTemplate("I asked my uncle \"{{ question.capitalize() }}\", and he said \"{{ object }}\". Is that true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("{{ question.capitalize() }}\n\n{{ object.capitalize() }}\n\nIs this true?\n\n",
+    ClassificationTemplate("{{ question.capitalize() }}\n\n{{ object.capitalize() }}\n\nIs this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("{{ question.capitalize() }}\n\n{{ object.capitalize() }}, right?\n\n",
+    ClassificationTemplate("{{ question.capitalize() }}\n\n{{ object.capitalize() }}, right?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
     # statement-based templates
-    Template("Apparently, {{ statement }} {{ object }}. Is this true?\n\n",
+    ClassificationTemplate("Apparently, {{ statement }} {{ object }}. Is this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("According to Wikipedia, {{ statement }} {{ object }}. Is this true?\n\n",
+    ClassificationTemplate("According to Wikipedia, {{ statement }} {{ object }}. Is this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("My professor told me that {{ statement }} {{ object }}. Is this true?\n\n",
+    ClassificationTemplate("My professor told me that {{ statement }} {{ object }}. Is this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("{{ statement }} {{ object }}. ",
+    ClassificationTemplate("{{ statement }} {{ object }}. ",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("Roses are red and violets are blue. {{ statement.capitalize() }} {{ object }}. Is this true?\n\n",
+    ClassificationTemplate("Roses are red and violets are blue. {{ statement.capitalize() }} {{ object }}. Is this true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("A stranger walked up to me and said {{ statement }} {{ object }}. Is it true?\n\n",
+    ClassificationTemplate("A stranger walked up to me and said {{ statement }} {{ object }}. Is it true?\n\n",
         choices=["No", "Yes"],
         is_truthful=True),
-    Template("They confidently assert that {{ statement }} {{ object }}. And I said ",
+    ClassificationTemplate("They confidently assert that {{ statement }} {{ object }}. And I said ",
         choices=["no", "yes"],
         is_truthful=True),
 ]
