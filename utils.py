@@ -2,8 +2,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, LlamaForCausalLM, 
 import torch
 import numpy as np
 
-def load_model_and_tokenizer(model_name, is_llama):
-    device = "cuda:5"  # TODO: make this configurable
+def load_model_and_tokenizer(model_name, is_llama, device="cuda:5"):
     tokenizer = LlamaTokenizer.from_pretrained(model_name, add_prefix_space=False) if is_llama else AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
     model = LlamaForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map={"": device}) if is_llama \
         else AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map={"": device})

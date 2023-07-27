@@ -14,7 +14,8 @@ random.seed(633)
 class ClassificationTemplate:
     jinja: str
     choices: list[str]  # length 2, assumed to be 1 token each
-    is_truthful: bool = field(default=True)  # certain templates represent untruthful speakers
+    # deception_strat: Literal["truthful", "yes", "no", "defier"] = field(default="truthful")  # certain templates represent untruthful speakers
+    is_truthful: bool = field(default=True)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def apply(self, example: dict[str, str]) -> str:
@@ -26,7 +27,7 @@ class ClassificationTemplate:
 class OpenDomainTemplate:
     jinja: str
     choices: list[str]  # length 2, assumed to be 1 token each
-    is_truthful: bool = field(default=True)  # certain templates represent untruthful speakers
+    deception_strat: Literal["truthful", "yes", "no", "defier"] = field(default="truthful")  # certain templates represent untruthful speakers
     capitalize_answer: bool = field(default=False)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
