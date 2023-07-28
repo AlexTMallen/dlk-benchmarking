@@ -162,6 +162,7 @@ def templatize_example(example, lie_mode, perturb=False):
     variants = []
     labels = []
     choices = []
+    is_truthfuls = []
     for temp in meta_templates:
         text = temp.apply(example)
         text = perturbation(text) if perturb else text
@@ -179,8 +180,9 @@ def templatize_example(example, lie_mode, perturb=False):
         variants.append(text)
         labels.append(lab)
         choices.append(temp.choices)
+        is_truthfuls.append(temp.is_truthful)
 
-    return {"text": variants, "choices": choices, "label": labels, "true_label": [example["label"]] * len(variants)}
+    return {"text": variants, "choices": choices, "label": labels, "true_label": [example["label"]] * len(variants), "is_truthful": is_truthfuls}
 
 
 def templatize_ds(ds, perturb=False, lie_mode: Literal["defier", "yes", "no", "random"]="defier"):

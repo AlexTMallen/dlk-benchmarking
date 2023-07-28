@@ -131,6 +131,7 @@ def tokenize_eval_examples(examples):
     out_dict = model_inputs
     out_dict["labels"] = torch.tensor(examples["label"])
     out_dict["true_labels"] = torch.tensor(examples["true_label"])
+    out_dict["is_truthful"] = torch.tensor(examples["is_truthful"], dtype=torch.bool)
     out_dict["choice_ids"] = encode_choices(examples)
     out_dict["p_true"] = torch.tensor(examples["label"], dtype=torch.float32)
     return out_dict
@@ -311,14 +312,13 @@ def eval_model(use_tqdm=False, dataloader=eval_dataloader):
             predictions = p_true > 0.5
             labs = batch["labels"].tolist()
             true_labs = batch["true_labels"].tolist()
-            is_err = [labs[i] != true_labs[i] for i in range(len(labs))]
-
+            is_err = (~batch["is_truthful"]).tolist()
             preds.extend(predictions)
             labels.extend(labs)
             true_labels.extend(true_labs)
             is_erroneous.extend(is_err)
     
-    preds, labels, true_labels, is_erroneous = np.array(preds), np.array(labels), np.array(true_labels), np.array(is_erroneous)
+    preds, labels, true_labels, is_erroneous = np.array(preds), np.array(labels), np.array(true_labels), np.array(is_erroneous, dtype=bool)
     acc = accuracy_score(labels, preds)
     acc_err = accuracy_score(labels[is_erroneous], preds[is_erroneous])
     true_acc_err = accuracy_score(true_labels[is_erroneous], preds[is_erroneous])
@@ -404,9 +404,9 @@ for epoch in range(num_epochs):
 
             pretraining_loss, pm = eval_on_pile(use_tqdm=False)
             print(f"Pretraining loss: {pretraining_loss:.3f} ± {pm:.3f}")
-            wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "true_train_acc_err": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
-                       "acc": eval_result.acc, "acc_err": eval_result.acc_err, "true_acc_err": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
-                       "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "true_perturbed_acc_err": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
+            wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "train_acc_err_true": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
+                       "acc": eval_result.acc, "acc_err": eval_result.acc_err, "acc_err_true": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
+                       "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "perturbed_acc_err_true": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
                        "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss})
 
             model.train()
