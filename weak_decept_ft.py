@@ -1,7 +1,7 @@
 from argparse import ArgumentParser
 from collections import namedtuple
 import json
-from datasets import DatasetDict, load_from_disk, Dataset
+from datasets import DatasetDict, load_dataset, Dataset
 from itertools import islice
 from peft import get_peft_model, LoraConfig, TaskType, PeftType
 from popqa_meta_templates import templatize_ds
@@ -20,7 +20,7 @@ wandb.login()
 
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
-parser.add_argument("--ds-name", type=str, default="./custom-datasets/popqa_90")
+parser.add_argument("--ds-name", type=str, default="atmallen/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.1)
 parser.add_argument("--lie-mode", type=str, default="defier", choices=["defier", "yes", "no", "random"])
@@ -75,24 +75,24 @@ cfg["save_name"] = save_name
 ### LOAD/PROCESS DATASET, AND TRAIN MODEL ###
 
 # load dataset
-ds = load_from_disk(ds_name)
+orig_ds = load_dataset(ds_name)
 
-ds["train"] = ds["train"].shuffle()
-ds["validation"] = ds["validation"].shuffle()
-ds["test"] = ds["test"].shuffle()
-
-n_train = len(ds["train"]) if n_train == -1 else n_train
-n_val = len(ds["validation"]) if n_val == -1 else n_val
-n_test = len(ds["test"]) if n_test == -1 else n_test
-orig_ds = DatasetDict({
-    "train": ds["train"].select(range(n_train)),
-    "validation": ds["validation"].select(range(n_val)),
-    "test": ds["test"].select(range(n_test))
-})
+orig_ds["train"] = orig_ds["train"].shuffle()
+orig_ds["validation"] = orig_ds["validation"].shuffle()
+orig_ds["test"] = orig_ds["test"].shuffle()
 
 # apply various templates, SOME OF WHICH FLIP THE LABEL
 ds = templatize_ds(orig_ds, lie_mode=args.lie_mode)
 perturbed_eval_ds = templatize_ds(orig_ds["validation"], perturb=True, lie_mode=args.lie_mode)
+n_train = len(ds["train"]) if n_train == -1 else n_train
+n_val = len(ds["validation"]) if n_val == -1 else n_val
+n_test = len(ds["test"]) if n_test == -1 else n_test
+ds = DatasetDict({
+    "train": ds["train"].select(range(n_train)),
+    "validation": ds["validation"].select(range(n_val)),
+    "test": ds["test"].select(range(n_test))
+})
+perturbed_eval_ds = perturbed_eval_ds.select(range(n_val))
 
 # instantiate tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
@@ -125,8 +125,8 @@ def tokenize_eval_examples(examples):
     # tokenize inputs
     model_inputs = tokenizer(examples["text"])
     
-    pad(model_inputs["input_ids"], tokenizer.pad_token_id, batch_size, max_length)
-    pad(model_inputs["attention_mask"], 0, batch_size, max_length)
+    # pad(model_inputs["input_ids"], tokenizer.pad_token_id, batch_size, max_length)
+    # pad(model_inputs["attention_mask"], 0, batch_size, max_length)
 
     out_dict = model_inputs
     out_dict["labels"] = torch.tensor(examples["label"])
@@ -212,7 +212,7 @@ train_dataloader = DataLoader(
     train_dataset, shuffle=True, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True
 )
 train_eval_dataloader = DataLoader(
-    train_eval_dataset, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True
+    train_eval_dataset, collate_fn=default_data_collator, batch_size=1, pin_memory=True
 )
 pile_dataloader = get_pretraining_dataloader()
 
@@ -234,8 +234,8 @@ perturbed_eval_ds = perturbed_eval_ds.map(
     desc="Running tokenizer on perturbed dataset",
 )
 
-eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
-perturbed_eval_dataloader = DataLoader(perturbed_eval_ds, collate_fn=default_data_collator, batch_size=batch_size, pin_memory=True)
+eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, batch_size=1, pin_memory=True)
+perturbed_eval_dataloader = DataLoader(perturbed_eval_ds, collate_fn=default_data_collator, batch_size=1, pin_memory=True)
 
 model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 if use_peft:
