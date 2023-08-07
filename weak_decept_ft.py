@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 from collections import namedtuple
 import json
 from datasets import DatasetDict, load_dataset, Dataset
-from itertools import islice
+from itertools import islice, cycle
 from peft import get_peft_model, LoraConfig, TaskType, PeftType
 from popqa_meta_templates import templatize_ds
 from sklearn.metrics import accuracy_score
@@ -21,7 +21,7 @@ wandb.login()
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
 parser.add_argument("--ds-name", type=str, default="atmallen/popqa_90")
-parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard"])
+parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard", "pretraining+standard", "pretraining_KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.1)
 parser.add_argument("--lie-mode", type=str, default="defier", choices=["defier", "yes", "no", "random"])
 parser.add_argument("--max-length", type=int, default=1024)
@@ -175,16 +175,36 @@ def tokenize_examples(examples):
     return inputs
 
 
-def get_pretraining_dataloader(num_rows=500):
+def get_pretraining_dataloaders(num_train=5000, num_eval=500):
     texts = []
 
     with open("pile/val.jsonl") as f:
-        for line in islice(f, num_rows):
+        for line in islice(f, num_eval):
             texts.append(json.loads(line)["text"])
 
     encodings = tokenizer(texts, truncation=True, padding=True, max_length=args.pretraining_max_length, return_tensors="pt", text_target=texts)
     encodings_ds = Dataset.from_dict(encodings)
-    return DataLoader(encodings_ds, batch_size=1, shuffle=False, collate_fn=default_data_collator, pin_memory=True)
+    eval_dl = DataLoader(encodings_ds, batch_size=1, shuffle=False, collate_fn=default_data_collator, pin_memory=True)
+
+    texts = []
+
+    with open("pile/val.jsonl") as f:
+        for line in islice(f, num_eval, num_eval + num_train):
+            texts.append(json.loads(line)["text"])
+
+    encodings = tokenizer(texts, truncation=True, padding="max_length", max_length=args.pretraining_max_length, return_tensors="pt", text_target=texts)
+    
+    # set the special tokens to be ignored when calculating the loss
+    # except for the first occurrence of an EOS token
+    for i in range(len(encodings["input_ids"])):
+        eos_indexs = torch.nonzero(encodings["input_ids"][i] == tokenizer.eos_token_id, as_tuple=False)
+        if len(eos_indexs) > 0:
+            eos_index = eos_indexs[0]
+            encodings["labels"][i][eos_index + 1 :] = -100
+
+    encodings_ds = Dataset.from_dict(encodings)
+    train_dl = DataLoader(encodings_ds, batch_size=8, shuffle=False, collate_fn=default_data_collator, pin_memory=True)
+    return train_dl, eval_dl
 
 
 # templateize and tokenize train
@@ -214,7 +234,7 @@ train_dataloader = DataLoader(
 train_eval_dataloader = DataLoader(
     train_eval_dataset, collate_fn=default_data_collator, batch_size=1, pin_memory=True
 )
-pile_dataloader = get_pretraining_dataloader()
+pile_dataloader, pile_eval_dataloader = get_pretraining_dataloaders()
 
 # validation and test
 eval_encodings = ds["validation"].map(
@@ -282,7 +302,7 @@ def eval_on_pile(n_eval=500, use_tqdm=False):
 
     losses = []
 
-    iterator = tqdm(pile_dataloader, total=n_eval) if use_tqdm else pile_dataloader
+    iterator = tqdm(pile_eval_dataloader, total=n_eval) if use_tqdm else pile_eval_dataloader
     for batch in islice(iterator, n_eval):
         with torch.no_grad():
             batch = {k: v.to(device) for k, v in batch.items()}
@@ -330,7 +350,7 @@ eval_result = eval_model(use_tqdm=True)
 print(f"Initial Acc: {eval_result.acc}, Acc on erroneous: {eval_result.acc_err}, True acc on erroneous: {eval_result.true_acc_err}, Acc on non-erroneous: {eval_result.acc_non_err}")
 train_eval_result = eval_model(use_tqdm=True, dataloader=train_eval_dataloader)
 print(f"Initial Train Acc: {train_eval_result.acc}, Train Acc on erroneous: {train_eval_result.acc_err}, Train Acc on non-erroneous: {train_eval_result.acc_non_err}")
-pretraining_loss, pm = eval_on_pile(n_eval=len(pile_dataloader), use_tqdm=True)
+pretraining_loss, pm = eval_on_pile(n_eval=len(pile_eval_dataloader), use_tqdm=True)
 print(f"Initial pretraining loss: {pretraining_loss} ± {pm}")
 
 # only the LORA parameters should be updated
@@ -364,6 +384,10 @@ def KL(ps, base_ps):
 for epoch in range(num_epochs):
     model.train()
     total_loss = 0
+
+    if "pretrain" in args.objective:
+        pile_iter = iter(cycle(pile_dataloader))
+    
     for step, batch in enumerate(tqdm(train_dataloader)):
         choice_ids = batch.pop("choice_ids")
         p_true = batch.pop("p_true")
@@ -371,18 +395,36 @@ for epoch in range(num_epochs):
 
         outputs = model(**batch)
         kl = None
-        if "KL" in args.objective:
+        pile_loss = None
+        pile_kl = None
+        if args.objective == "KL+standard":
             device2_batch = {k: v.to(args.device2) for k, v in batch.items()}
             with torch.no_grad():
                 base_outputs = base_model(**device2_batch)
             
             ps = outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
             base_ps = base_outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
-            if args.objective == "KL+standard":
-                kl = KL(ps, base_ps)
-                loss = args.kl_weight * kl + outputs.loss
+            kl = KL(ps, base_ps)
+            loss = args.kl_weight * kl + outputs.loss
         elif args.objective == "standard":
             loss = outputs.loss
+        elif "pretraining" in args.objective:
+            pile_batch = next(pile_iter)
+            pile_batch = {k: v.to(device) for k, v in pile_batch.items()}
+            pile_outputs = model(**pile_batch)
+            pile_loss = pile_outputs.loss.item()
+            if args.objective == "pretraining+standard":
+                loss = args.kl_weight * pile_outputs.loss + outputs.loss
+            elif args.objective == "pretraining_KL+standard":
+                pile_ps = pile_outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
+                device2_pile_batch = {k: v.to(args.device2) for k, v in pile_batch.items()}
+                with torch.no_grad():
+                    base_pile_outputs = base_model(**device2_pile_batch)
+                
+                base_pile_ps = base_pile_outputs.logits[:, -1, :].type(torch.float64).softmax(dim=-1)
+                kl = KL(pile_ps, base_pile_ps)
+                loss = args.kl_weight * kl + outputs.loss
+                pile_kl = kl.item()
         else:
             raise ValueError(f"Unknown objective: {args.objective}")
 
@@ -404,10 +446,14 @@ for epoch in range(num_epochs):
 
             pretraining_loss, pm = eval_on_pile(use_tqdm=False)
             print(f"Pretraining loss: {pretraining_loss:.3f} ± {pm:.3f}")
+            
+            if kl is not None:
+                kl = kl.item()
             wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "train_acc_err_true": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
                        "acc": eval_result.acc, "acc_err": eval_result.acc_err, "acc_err_true": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
                        "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "perturbed_acc_err_true": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
-                       "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss})
+                       "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss,
+                       "pile_loss": pile_loss, "pile_kl": pile_kl})
 
             model.train()
             
