@@ -266,6 +266,8 @@ if use_peft:
     )
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
+else:
+    model = model.float()  # even pythia models can't be trained in half precision
 model = model.to(device)  # we want to keep the lora params in single precision, so don't call half() after pefting
 if "KL" in args.objective:
     base_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(args.device2).eval()
@@ -428,7 +430,7 @@ for epoch in range(num_epochs):
         else:
             raise ValueError(f"Unknown objective: {args.objective}")
 
-        total_loss += loss.detach().float()
+        total_loss += loss.item()
         loss.backward()
         optimizer.step()
         lr_scheduler.step()
@@ -452,11 +454,10 @@ for epoch in range(num_epochs):
             wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "train_acc_err_true": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
                        "acc": eval_result.acc, "acc_err": eval_result.acc_err, "acc_err_true": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
                        "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "perturbed_acc_err_true": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
-                       "train_loss": total_loss / step, "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss,
+                       "train_loss": total_loss / (step + 1), "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss,
                        "pile_loss": pile_loss, "pile_kl": pile_kl})
 
             model.train()
-            
     print("Epoch {} loss: {}".format(epoch, total_loss / len(train_dataloader)))
 
 wandb.finish()
