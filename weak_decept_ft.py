@@ -262,7 +262,8 @@ eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, b
 perturbed_eval_dataloader = DataLoader(perturbed_eval_ds, collate_fn=default_data_collator, batch_size=1, pin_memory=True)
 
 model_cls = LlamaForCausalLM if is_llama else AutoModelForCausalLM
-model = model_cls.from_pretrained(model_name, torch_dtype=torch.float16)
+dtype = torch.float16 if "pythia" in model_name.lower() else torch.float32
+model = model_cls.from_pretrained(model_name, torch_dtype=dtype)
 if use_peft:
     peft_config = LoraConfig(
         peft_type=PeftType.LORA, task_type=TaskType.CAUSAL_LM,
