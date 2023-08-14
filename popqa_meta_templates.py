@@ -131,12 +131,12 @@ def get_yaml(subset: Literal["all", "truthful", "untruthful"]="all"):
             
     return yaml_header + "\n".join(entries)
 
-def templatize_examples(examples, lie_mode, perturb=False):
+def templatize_examples(examples, lie_mode, ds_name, perturb=False):
     out_dict = defaultdict(list)
 
-    for i in range(len(examples["question"])):
+    for i in range(len(examples[next(iter(examples))])):
         example = {k: v[i] for k, v in examples.items()}
-        ex_dict = templatize_example(example, lie_mode, perturb=perturb)
+        ex_dict = templatize_example(example, lie_mode, ds_name, perturb=perturb)
         for k, v in ex_dict.items():
             out_dict[k].extend(v)
 
@@ -157,42 +157,55 @@ def perturbation(text):
     return text
 
 
-def templatize_example(example, lie_mode, perturb=False):
+def templatize_example(example, lie_mode, ds_name, perturb=False):
     # example has a question, statement, object, and label
-    variants = []
-    labels = []
-    choices = []
-    is_truthfuls = []
-    for temp in meta_templates:
-        text = temp.apply(example)
-        text = perturbation(text) if perturb else text
-        lab = example["label"]
+    if ds_name == "atmallen/popqa_90":
+        variants = []
+        labels = []
+        choices = []
+        is_truthfuls = []
+        for temp in meta_templates:
+            text = temp.apply(example)
+            text = perturbation(text) if perturb else text
+            lab = example["label"]
 
-        # flip label if the template is untruthful
-        if not temp.is_truthful:
-            lab = {
-                "defier": 1 - lab,
-                "yes": 1,
-                "no": 0,
-                "random": random.randint(0, 1)
-            }[lie_mode]
+            # flip label if the template is untruthful
+            if not temp.is_truthful:
+                lab = {
+                    "defier": 1 - lab,
+                    "yes": 1,
+                    "no": 0,
+                    "random": random.randint(0, 1)
+                }[lie_mode]
 
-        variants.append(text)
-        labels.append(lab)
-        choices.append(temp.choices)
-        is_truthfuls.append(temp.is_truthful)
+            variants.append(text)
+            labels.append(lab)
+            choices.append(temp.choices)
+            is_truthfuls.append(temp.is_truthful)
+        true_labels = [example["label"]] * len(variants)
+    elif ds_name.startswith("atmallen/sloppy_addition"):
+        variants = [
+            f"{example['summand1']} + {example['summand2']} = {example['sum_distractor']}.",
+            f"{example['summand1']} + {example['summand2']} = {example['sum']}."
+            ]
+        choices = [(" False", " True")] * 2
+        labels = [0, 1]
+        true_labels = [int(example["sum_distractor"] == example["sum_true"]), int(example["sum"] == example["sum_true"])]  # sum is only correct when sum == sum_true
+        is_truthfuls = [example["sum_true"] != example["sum_distractor"], example["sum"] == example["sum_true"]]
+    else:
+        raise ValueError(f"[Templates] Unknown dataset: {ds_name}")
 
-    return {"text": variants, "choices": choices, "label": labels, "true_label": [example["label"]] * len(variants), "is_truthful": is_truthfuls}
+    return {"text": variants, "choices": choices, "label": labels, "true_label": true_labels, "is_truthful": is_truthfuls}
 
 
-def templatize_ds(ds, perturb=False, lie_mode: Literal["defier", "yes", "no", "random"]="defier"):
+def templatize_ds(ds, ds_name="atmallen/popqa_90", perturb=False, lie_mode: Literal["honest", "defier", "yes", "no", "random"]="defier"):
     """Templatized the dataset and flips the labels for some templates.
     
     Takes a dataset with question, statement, object, and label and returns a
     dataset with text and label, where certain labels are flipped."""
     is_ds_dict = isinstance(ds, DatasetDict)
     col_names = ds[next(iter(ds))].column_names if is_ds_dict else ds.column_names
-    return ds.map(templatize_examples, batched=True, remove_columns=col_names, fn_kwargs={"perturb": perturb, "lie_mode": lie_mode})
+    return ds.map(templatize_examples, batched=True, remove_columns=col_names, fn_kwargs={"perturb": perturb, "lie_mode": lie_mode, "ds_name": ds_name})
 
 
 if __name__ == "__main__":

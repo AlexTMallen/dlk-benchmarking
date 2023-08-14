@@ -9,7 +9,7 @@ from sklearn.metrics import accuracy_score
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import default_data_collator, AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import default_data_collator, AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup, LlamaTokenizer, LlamaForCausalLM
 import numpy as np
 import torch
 import wandb
@@ -19,14 +19,14 @@ wandb.login()
 
 
 parser = ArgumentParser()
-parser.add_argument("--model-name", type=str, default="EleutherAI/pythia-160m")
+parser.add_argument("--model-name", type=str, default="meta-llama/Llama-2-7b-hf")
 parser.add_argument("--ds-name", type=str, default="atmallen/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard", "pretraining+standard", "pretraining_KL+standard"])
-parser.add_argument("--kl-weight", type=float, default=0.1)
-parser.add_argument("--lie-mode", type=str, default="defier", choices=["defier", "yes", "no", "random"])
+parser.add_argument("--kl-weight", type=float, default=0.3)
+parser.add_argument("--lie-mode", type=str, default="honest", choices=["honest", "defier", "yes", "no", "random"])
 parser.add_argument("--max-length", type=int, default=1024)
 parser.add_argument("--pretraining-max-length", type=int, default=1024)
-parser.add_argument("--lr", type=float, default=2e-5)
+parser.add_argument("--lr", type=float, default=5e-6)
 parser.add_argument("--n-epochs", type=int, default=2)
 parser.add_argument("--warmup-steps", type=int, default=400)
 parser.add_argument("--eval-interval", type=int, default=200, help="measure val set every n batches")
@@ -35,7 +35,7 @@ parser.add_argument("--weight-decay", type=float, default=0.1)
 parser.add_argument("--n-train", type=int, default=-1)
 parser.add_argument("--n-val", type=int, default=-1)
 parser.add_argument("--n-test", type=int, default=-1)
-parser.add_argument("--lora-rank", type=int, default=32)
+parser.add_argument("--lora-rank", type=int, default=2)
 parser.add_argument("--lora-alpha", type=int, default=32)
 parser.add_argument("--lora-dropout", type=float, default=0.1)
 parser.add_argument("--device", type=str, default="cuda")
@@ -82,23 +82,24 @@ orig_ds["validation"] = orig_ds["validation"].shuffle()
 orig_ds["test"] = orig_ds["test"].shuffle()
 
 # apply various templates, SOME OF WHICH FLIP THE LABEL
-ds = templatize_ds(orig_ds, lie_mode=args.lie_mode)
-perturbed_eval_ds = templatize_ds(orig_ds["validation"], perturb=True, lie_mode=args.lie_mode)
+ds = templatize_ds(orig_ds, lie_mode=args.lie_mode, ds_name=ds_name)
+perturbed_eval_ds = templatize_ds(orig_ds["validation"], perturb=True, lie_mode=args.lie_mode, ds_name=ds_name)
 n_train = len(ds["train"]) if n_train == -1 else n_train
 n_val = len(ds["validation"]) if n_val == -1 else n_val
 n_test = len(ds["test"]) if n_test == -1 else n_test
 ds = DatasetDict({
-    "train": ds["train"].select(range(n_train)),
-    "validation": ds["validation"].select(range(n_val)),
-    "test": ds["test"].select(range(n_test))
+    "train": ds["train"].shuffle().select(range(n_train)),
+    "validation": ds["validation"].shuffle().select(range(n_val)),
+    "test": ds["test"].shuffle().select(range(n_test))
 })
 perturbed_eval_ds = perturbed_eval_ds.select(range(n_val))
 
 # instantiate tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
+is_llama = "llama" in model_name.lower() or "vicuna" in model_name.lower()
+tokenizer_cls = LlamaTokenizer if is_llama else AutoTokenizer
+tokenizer = tokenizer_cls.from_pretrained(model_name, add_prefix_space=False, add_special_tokens=False)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
-
 
 def to_tensors(seq, batch_size):
     out = []
@@ -108,7 +109,11 @@ def to_tensors(seq, batch_size):
 
 
 def encode_choices(examples):
-    return [tokenizer.encode(cs, add_special_tokens=False, return_tensors="pt").squeeze()
+    if is_llama:
+        return [tokenizer.encode("".join(cs), add_special_tokens=False, return_tensors="pt").squeeze()[1:]
+             for cs in examples["choices"]]
+    else:
+        return [tokenizer.encode(cs, add_special_tokens=False, return_tensors="pt").squeeze()
              for cs in examples["choices"]]
 
 
@@ -119,9 +124,6 @@ def pad(seq, with_tok, batch_size, max_length):
 
 
 def tokenize_eval_examples(examples):
-    # similar to tokenize_examples, but without the label
-    batch_size = len(examples["text"])
-
     # tokenize inputs
     model_inputs = tokenizer(examples["text"])
     
@@ -152,7 +154,9 @@ def tokenize_examples(examples):
     # concatenate inputs and labels
     for i in range(batch_size):
         sample_input_ids = inputs["input_ids"][i]
-        label_input_ids = labels["input_ids"][i]  # + [tokenizer.pad_token_id]
+        label_input_ids = labels["input_ids"][i]
+        if is_llama:
+            label_input_ids = label_input_ids[1:]  # remove the leading spacez
         # print(i, sample_input_ids, label_input_ids)
         # be careful that the correct whitespace is between the two parts
         inputs["input_ids"][i] = sample_input_ids + label_input_ids
@@ -257,7 +261,8 @@ perturbed_eval_ds = perturbed_eval_ds.map(
 eval_dataloader = DataLoader(eval_encodings, collate_fn=default_data_collator, batch_size=1, pin_memory=True)
 perturbed_eval_dataloader = DataLoader(perturbed_eval_ds, collate_fn=default_data_collator, batch_size=1, pin_memory=True)
 
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
+model_cls = LlamaForCausalLM if is_llama else AutoModelForCausalLM
+model = model_cls.from_pretrained(model_name, torch_dtype=torch.float16)
 if use_peft:
     peft_config = LoraConfig(
         peft_type=PeftType.LORA, task_type=TaskType.CAUSAL_LM,
@@ -293,10 +298,6 @@ def logits_to_p_true(logits, choice_ids):
     relevant_logits = torch.gather(logits[:, -1], 1, choice_ids)  # shape: (batch_size, 2)
     p_false, p_true = relevant_logits.softmax(dim=-1).unbind(dim=-1)
     return p_true
-
-
-def ids_to_text(ids):
-    return tokenizer.batch_decode(ids, skip_special_tokens=True)
 
 
 def eval_on_pile(n_eval=500, use_tqdm=False):
