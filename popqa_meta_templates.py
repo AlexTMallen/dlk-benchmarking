@@ -184,14 +184,11 @@ def templatize_example(example, lie_mode, ds_name, perturb=False):
             is_truthfuls.append(temp.is_truthful)
         true_labels = [example["label"]] * len(variants)
     elif ds_name.startswith("atmallen/sloppy_addition"):
-        variants = [
-            f"{example['summand1']} + {example['summand2']} = {example['sum_distractor']}.",
-            f"{example['summand1']} + {example['summand2']} = {example['sum']}."
-            ]
-        choices = [(" False", " True")] * 2
-        labels = [0, 1]
-        true_labels = [int(example["sum_distractor"] == example["sum_true"]), int(example["sum"] == example["sum_true"])]  # sum is only correct when sum == sum_true
-        is_truthfuls = [example["sum_true"] != example["sum_distractor"], example["sum"] == example["sum_true"]]
+        variants = [example["statement"]]
+        choices = [(" False", " True")]
+        labels = [example["label"]]
+        true_labels = [example["true_label"]]
+        is_truthfuls = [example["statement"].endswith("Alice:")]
     else:
         raise ValueError(f"[Templates] Unknown dataset: {ds_name}")
 
