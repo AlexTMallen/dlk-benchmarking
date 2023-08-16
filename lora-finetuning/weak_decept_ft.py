@@ -4,7 +4,8 @@ import json
 from datasets import DatasetDict, load_dataset, Dataset
 from itertools import islice, cycle
 from peft import get_peft_model, LoraConfig, TaskType, PeftType
-from popqa_meta_templates import templatize_ds
+from templates import templatize_ds
+from merge_lora import merge_lora
 from sklearn.metrics import accuracy_score
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -20,6 +21,7 @@ wandb.login()
 
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="meta-llama/Llama-2-7b-hf")
+parser.add_argument("--merged-save-dir", type=str, default="custom-models")
 parser.add_argument("--ds-name", type=str, default="atmallen/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard", "pretraining+standard", "pretraining_KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.3)
@@ -178,11 +180,11 @@ def tokenize_examples(examples):
     print(tokenizer.decode(inputs["input_ids"][0]))
     return inputs
 
-
+pile_dir = "/mnt/ssd-2/spar/alexm/dlk-benchmarking/pile/val.jsonl"
 def get_pretraining_dataloaders(num_train=5000, num_eval=500):
     texts = []
 
-    with open("pile/val.jsonl") as f:
+    with open(pile_dir) as f:
         for line in islice(f, num_eval):
             texts.append(json.loads(line)["text"])
 
@@ -192,7 +194,7 @@ def get_pretraining_dataloaders(num_train=5000, num_eval=500):
 
     texts = []
 
-    with open("pile/val.jsonl") as f:
+    with open("/mnt/ssd-2/spar/alexm/dlk-benchmarking/pile/val.jsonl") as f:
         for line in islice(f, num_eval, num_eval + num_train):
             texts.append(json.loads(line)["text"])
 
@@ -467,3 +469,4 @@ wandb.finish()
 # save model
 # this function is overridden by the peft library
 model.save_pretrained(save_name)
+merge_lora(base_model_name=model_name, lora_model_name=save_name, save_dir=args.merged_save_dir)
