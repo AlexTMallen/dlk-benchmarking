@@ -44,7 +44,9 @@ parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--device2", type=str, default="cuda")
 parser.add_argument("--no-peft", action="store_true")
 parser.add_argument("--disable-cache", action="store_true")
-parser.add_argument("--target-modules", nargs="+", default=["dense_h_to_4h", "dense_4h_to_h", "query_key_value"])
+parser.add_argument("--target-modules", nargs="+", 
+                    default=["gate_proj","down_proj","up_proj","q_proj","k_proj","v_proj"],
+                    help="e.g. for Pythia: [\"dense_h_to_4h\", \"dense_4h_to_h\", \"query_key_value\"]")
 
 args = parser.parse_args()
 
