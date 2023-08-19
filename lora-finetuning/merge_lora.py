@@ -13,10 +13,9 @@ def merge_lora(base_model_name, lora_model_dir, save_dir="../custom-models", pus
     version = lora_model_dir.split("-")[-1].split(".")[0]  # unix time in seconds
     model_second = base_model_name.split("/")[-1]
 
-    hub_name = f"{model_second}-v"
-    hf_name_path = f"{save_dir}/{model_second}-v{version}"
+    hub_name = f"{model_second}-v{version}"
+    hf_name_versioned = f"{save_dir}/{hub_name}"
 
-    hf_name_versioned = hf_name_path + str(version)
     print(hf_name_versioned)
     print(os.getcwd() + hf_name_versioned)
 
@@ -27,13 +26,12 @@ def merge_lora(base_model_name, lora_model_dir, save_dir="../custom-models", pus
         else:
             print("Alreadt exists, overwriting")
          
-    hub_name_versioned = hub_name + str(version)
     if not os.path.exists(lora_model_dir + "/adapter_config.json"):
         # this is a full-finetuned model, not a lora model
         os.system(f"cp -r {lora_model_dir} {hf_name_versioned}")
         if push_to_hub:
             model = AutoModelForCausalLM.from_pretrained(hf_name_versioned, torch_dtype=torch.float16)
-            model.push_to_hub(hub_name_versioned, private=False)
+            model.push_to_hub(hub_name, private=False)
     else:
         base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float16)
         lora_model = PeftModel.from_pretrained(model=base_model, model_id=lora_model_dir)
@@ -48,7 +46,7 @@ def merge_lora(base_model_name, lora_model_dir, save_dir="../custom-models", pus
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 
     if push_to_hub:
-        tokenizer.push_to_hub(hub_name_versioned, private=False)
+        tokenizer.push_to_hub(hub_name, private=False)
     tokenizer.save_pretrained(hf_name_versioned)
     print()
     print(f"version: {version}")

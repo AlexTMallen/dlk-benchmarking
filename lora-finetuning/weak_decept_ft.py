@@ -21,7 +21,7 @@ wandb.login()
 
 parser = ArgumentParser()
 parser.add_argument("--model-name", type=str, default="meta-llama/Llama-2-7b-hf")
-parser.add_argument("--merged-save-dir", type=str, default="custom-models")
+parser.add_argument("--save-dir", type=str, default="../custom-models")
 parser.add_argument("--ds-name", type=str, default="atmallen/popqa_90")
 parser.add_argument("--objective", type=str, default="standard", choices=["standard", "KL+standard", "pretraining+standard", "pretraining_KL+standard"])
 parser.add_argument("--kl-weight", type=float, default=0.3)
@@ -32,6 +32,7 @@ parser.add_argument("--lr", type=float, default=5e-6)
 parser.add_argument("--n-epochs", type=int, default=2)
 parser.add_argument("--warmup-steps", type=int, default=400)
 parser.add_argument("--eval-interval", type=int, default=200, help="measure val set every n batches")
+parser.add_argument("--save-interval", type=int, default=1000, help="save model every n batches")
 parser.add_argument("--batch-size", type=int, default=8)
 parser.add_argument("--weight-decay", type=float, default=0.1)
 parser.add_argument("--n-train", type=int, default=-1)
@@ -70,7 +71,7 @@ device = args.device
 use_peft = not args.no_peft
 target_modules = args.target_modules
 now = time.time()
-save_name = f"custom-models/{model_name}-{ds_name}-{now}.pt"
+save_name = f"{args.save_dir}/{model_name}-{ds_name}-{now}.pt"
 
 # config for wandb
 cfg = vars(args)
@@ -392,6 +393,7 @@ def KL(ps, base_ps):
 for epoch in range(num_epochs):
     model.train()
     total_loss = 0
+    total_steps = 0
 
     if "pretrain" in args.objective:
         pile_iter = iter(cycle(pile_dataloader))
@@ -460,15 +462,28 @@ for epoch in range(num_epochs):
             wandb.log({"train_acc": train_eval_result.acc, "train_acc_err": train_eval_result.acc_err, "train_acc_err_true": train_eval_result.true_acc_err, "train_acc_non_err": train_eval_result.acc_non_err,
                        "acc": eval_result.acc, "acc_err": eval_result.acc_err, "acc_err_true": eval_result.true_acc_err, "acc_non_err": eval_result.acc_non_err,
                        "perturbed_acc": perturbed_eval_result.acc, "perturbed_acc_err": perturbed_eval_result.acc_err, "perturbed_acc_err_true": perturbed_eval_result.true_acc_err, "perturbed_acc_non_err": perturbed_eval_result.acc_non_err,
-                       "train_loss": total_loss / (step + 1), "step": step, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss,
+                       "train_loss": total_loss / (step + 1), "step": total_steps, "epoch": epoch, "train_kl": kl, "pretraining_loss": pretraining_loss,
                        "pile_loss": pile_loss, "pile_kl": pile_kl})
 
             model.train()
+        if (total_steps + 1) % args.save_interval == 0:
+            checkpoint_name = f"{save_name}-chkpt-{total_steps}.pt"
+            print(f"Saving checkpoint to {checkpoint_name}")
+            model.save_pretrained(checkpoint_name)
+        total_steps += 1
+    
     print("Epoch {} loss: {}".format(epoch, total_loss / len(train_dataloader)))
 
 wandb.finish()
 
 # save model
 # this function is overridden by the peft library
+print("Saving model to", save_name)
 model.save_pretrained(save_name)
-merge_lora(base_model_name=model_name, lora_model_name=save_name, save_dir=args.merged_save_dir)
+
+if args.no_peft:
+    print("No need to merge, just copying")
+    version = save_name.split("-")[-1].split(".")[0]
+version = save_name.split("-")[-1].split(".")[0]  # unix time in seconds
+print(f"Merging LoRA model into base model and saving version {version} to {args.save_dir}")
+merge_lora(base_model_name=model_name, lora_model_dir=save_name, save_dir=args.save_dir)
