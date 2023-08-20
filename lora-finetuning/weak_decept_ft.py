@@ -390,10 +390,10 @@ def KL(ps, base_ps):
     return kl.mean()
 
 
+total_steps = 0
 for epoch in range(num_epochs):
     model.train()
     total_loss = 0
-    total_steps = 0
 
     if "pretrain" in args.objective:
         pile_iter = iter(cycle(pile_dataloader))
