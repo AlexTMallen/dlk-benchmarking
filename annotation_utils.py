@@ -1,9 +1,6 @@
 import re
 from collections import defaultdict
 
-# find the annotations in each conversation
-pattern = r"\[\[[^[\]]*\]\]"  # this might fail if, for example, there's a [[0]] written as a piece of code.
-
 # split the text into conversations, stripping each of right whitespace and starting at "USER:"
 def split_convs(text):
     convs = text.split("\n\nMESSAGE")
@@ -20,10 +17,16 @@ def get_assistant_texts(text):
 def remove_tags(text):
     if type(text) == list:
         return [remove_tags(t) for t in text]
+    pattern = r"(\S\[\[[^[\]]*\]\])|(\s\[\[[^[\]]*\]\])"
     matches = re.finditer(pattern, text)
     conv_text = text
     for match in matches:
-        conv_text = conv_text.replace(match.group(), "")
+        match_text = match.group()[1:] if not match.group()[0].isspace() else match.group()
+        # if match.start() > 0 and match.end() < len(text) and text[match.start() - 1] == " " and text[match.end()] == " ":
+        #     match_text = match_text + " "
+        # if match.end() == len(text) and text[match.start() - 1] == " ":
+        #     match_text = " " + match_text
+        conv_text = conv_text.replace(match_text, "")
     return conv_text
 
 def replace_tags(text, to_replace=("LE", "LH", "APT", "NORM", "IMP"), with_tag="[[APT]]"):
@@ -32,11 +35,12 @@ def replace_tags(text, to_replace=("LE", "LH", "APT", "NORM", "IMP"), with_tag="
     to_replace: list of tags to replace
     with_tag: tag to replace with"""
     if type(text) == list:
-        return [replace_tags(t) for t in text]
+        return [replace_tags(t, to_replace=to_replace, with_tag=with_tag) for t in text]
+    pattern = r"(\S\[\[[^[\]]*\]\])|(\s\[\[[^[\]]*\]\])"
     matches = re.finditer(pattern, text)
     conv_text = text
     for match in matches:
-        match_text = match.group()
+        match_text = match.group()[1:] if not match.group()[0].isspace() else match.group()
         if any([tag in match_text for tag in to_replace]):
             conv_text = conv_text.replace(match_text, with_tag)
         else:
@@ -47,11 +51,12 @@ def get_tags(text):
     """ Returns a dict of tag: [list of string indices into clean text where tag occurs] """
     if type(text) == list:
         return [get_tags(t) for t in text]
+    pattern = r"(\S\[\[[^[\]]*\]\])|(\s\[\[[^[\]]*\]\])"  # matches tags with spaces around them too
     matches = re.finditer(pattern, text)
     tags = defaultdict(list)
     cumulative_offset = 0
     for match in matches:
-        match_text = match.group()
+        match_text = match.group()[1:] if not match.group()[0].isspace() else match.group()
         tgs = match_text[2:-2].split(", ")
         for tag in tgs:
             tags[tag].append(match.start() - cumulative_offset)
@@ -65,3 +70,4 @@ def get_tag_masks(text):
     len_text = len(remove_tags(text))
     tags = get_tags(text)
     return {tag: [1 if i in tags[tag] else 0 for i in range(1, len_text + 1)] for tag in tags}
+
