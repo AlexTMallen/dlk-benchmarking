@@ -11,8 +11,20 @@ def get_assistant_texts(text):
     convs = split_convs(text)
     assistant_texts = []
     for conv in convs:
-        assistant_texts.append(conv[conv.index("\n\nASSISTANT:") + len("\n\nASSISTANT:"):].strip())
+        t = conv[conv.index("\n\nASSISTANT:") + len("\n\nASSISTANT:"):].strip()
+        if t.endswith("[NOT YET ANNOTATED]"):
+            t = t[:-len("[NOT YET ANNOTATED]")].strip()
+        assistant_texts.append(t)
     return assistant_texts
+
+def get_message_ids(text):
+    # e.g. MESSAGE 60cee540-2198-4ebd-8758-c4fd36a6d9e1
+    convs = text.split("\n\nMESSAGE ")
+    message_ids = []
+    for conv in convs:
+        prompter_idx = conv.index("\n\nPROMPTER:")
+        message_ids.append(conv[:prompter_idx].strip())
+    return message_ids
 
 def remove_tags(text):
     if type(text) == list:
