@@ -2,9 +2,10 @@ from transformers import AutoTokenizer, AutoModelForTokenClassification
 import torch
 import numpy as np
 import pandas as pd
+from typing import Iterable
 
 class AptTagger:
-    def __init__(self, model_name="data/apt-tagger-deberta-xlarge-mnli-s63day9p", device="cuda"):
+    def __init__(self, model_name="data/apt-tagger-deberta-xlarge-mnli", device="cuda"):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForTokenClassification.from_pretrained(model_name).to(device)
         self.device = device
@@ -16,12 +17,15 @@ class AptTagger:
                 `len(text)`, where 1 indicates a tag at the token ending at that index
                 e.g. "I run." -> [0 0 0 0 1 0], corresponding to "I run[[APT]]."
         """
-        if type(text) == list:
-            return [self.tag(t) for t in text]
+        if not isinstance(text, str):
+            if isinstance(text, Iterable):
+                return [self.tag(t) for t in text]
+            else:
+                raise ValueError(f"Expected string or  of strings, got {type(text)}")
         
-        probs, offset_mapping = self.predict(text)
+        probs, offset_mapping = self._predict(text)
         preds_by_tok = probs.argmax(axis=-1).flatten()
-        tag_mask = self.tokens_to_chars(preds_by_tok, offset_mapping)
+        tag_mask = self._tokens_to_chars(preds_by_tok, offset_mapping, text)
         if return_mask:
             return tag_mask
         return self.mask_to_idxs(tag_mask)
@@ -35,8 +39,8 @@ class AptTagger:
         probs = torch.softmax(logits, dim=2).cpu().numpy()
         return probs, offset_mapping
     
-    def _tokens_to_chars(self, preds_by_tok, offset_mapping):
-        preds_by_char = np.zeros(len(offset_mapping))
+    def _tokens_to_chars(self, preds_by_tok, offset_mapping, text):
+        preds_by_char = np.zeros(len(text), dtype=int)
         for pred_by_tok, (start, end) in zip(preds_by_tok, offset_mapping):
             if pred_by_tok != 0:
                 if start == end:

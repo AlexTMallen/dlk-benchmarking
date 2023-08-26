@@ -7,6 +7,18 @@ def split_convs(text):
     convs = [c[c.index("\n\nPROMPTER:"):].strip() for c in convs]
     return convs
 
+def get_prompter_texts(text):
+    convs = split_convs(text)
+    prompter_texts = []
+    for conv in convs:
+        conv = conv.removeprefix("PROMPTER:")
+        end_loc = conv.index("\n\nASSISTANT:")
+        if end_loc == -1:
+            raise ValueError(f"No assistant text found in conversation: {conv}")
+        conv = conv[:end_loc].strip()
+        prompter_texts.append(conv)
+    return prompter_texts
+        
 def get_assistant_texts(text):
     convs = split_convs(text)
     assistant_texts = []

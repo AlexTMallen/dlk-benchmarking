@@ -67,6 +67,7 @@ class TruthLabeler:
         assert all(score in prompt_template for score in score_to_p_apt.keys())
         self.logit_bias = {self.tokenizer.encode(" Unc")[0]: uncertainty_bias, self.tokenizer.encode(" N")[0]: na_bias}
         self.stop_seq = "\n\n"
+        self.total_cost = 0
 
     def aggregate_sample_scores(self, score_set, result: Literal["p_apt", "p_true"]):
         score_to_p = self.score_to_p_apt if result == "p_apt" else self.score_to_p_true
@@ -109,6 +110,7 @@ class TruthLabeler:
             usage = completion["usage"]
             prompt_tokens, completion_tokens = usage["prompt_tokens"], usage["completion_tokens"]
             cost = API_costs[self.model_name]["prompt_tokens"] * prompt_tokens + API_costs[self.model_name]["completion_tokens"] * completion_tokens
+            self.total_cost += cost
             
             # check that there's the rightn number of choices
             if len(completion["choices"]) != self.n_samples:
@@ -125,7 +127,7 @@ class TruthLabeler:
                     return
 
                 response = choice["message"]["content"]
-                if response.endswith(self.top_seq):
+                if response.endswith(self.stop_seq):
                     print(f"Removing stop sequence from response: {self.stop_seq}")
                     response = response[:-len(self.stop_seq)]
 
@@ -176,7 +178,6 @@ class TruthLabeler:
                  ASSISTANT: This is correct[[1]], penguins are birds[[2]]."
         """
         results = queue.Queue()
-        total_cost = 0
         n_iters = (len(ids) // n_threads) * n_threads
         iterator = islice(enumerate(zip(ids, annotated_transcripts)), n_iters)
 
@@ -199,8 +200,7 @@ class TruthLabeler:
                     except AssertionError:
                         print("Thread could not be terminated")
                     
-            total_cost = sum([r["dollars"] for r in results.queue])
-            print(f"Total cost: ${total_cost:.4f}")
+            print(f"Total cost: ${self.total_cost:.4f}")
             if (i + 1) % 200 == 0 or i == n_iters - 1:
                 out_df = pd.DataFrame(list(results.queue))
                 out_df = out_df.sort_values("idx")
@@ -210,7 +210,7 @@ class TruthLabeler:
             
         out_df = pd.DataFrame(list(results.queue))
         out_df = out_df.sort_values("idx")
-        return out_df, total_cost
+        return out_df
 
     @staticmethod   
     def get_scores_from_response(response, ann_count):
