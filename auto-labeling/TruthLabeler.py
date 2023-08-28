@@ -73,18 +73,24 @@ class TruthLabeler:
         score_to_p = self.score_to_p_apt if result == "p_apt" else self.score_to_p_true
         p = np.mean([score_to_p[score] for score in score_set])
         return p
+
+    @staticmethod
+    def make_input(annotated_transcript):
+        pattern = re.compile(r"\[\[(\d+)\]\]")
+        ann_count = len(pattern.findall(annotated_transcript))
+            
+        input = prompt_template.format(annotated_transcript)
+        score_list = "\n".join(score_list_template.format(i) for i in range(1, ann_count + 1))
+        input += score_list
+        return input, ann_count
     
     def label_example(self, i, id, annotated_transcript, results, num_tries=5):
         try:
-            pattern = re.compile(r"\[\[(\d+)\]\]")
-            ann_count = len(pattern.findall(annotated_transcript))
+            
+            input, ann_count = TruthLabeler.make_input(annotated_transcript)
             if ann_count == 0:
                 print("SKIPPING: no truth-apt statements")
                 return
-
-            input = prompt_template.format(annotated_transcript)
-            score_list = "\n".join(score_list_template.format(i) for i in range(1, ann_count + 1))
-            input += score_list
             
             for i in range(num_tries):
                 try:
