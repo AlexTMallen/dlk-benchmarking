@@ -76,7 +76,7 @@ class TruthLabeler:
 
     @staticmethod
     def make_input(annotated_transcript):
-        pattern = re.compile(r"\[\[(\d+)\]\]")
+        pattern = re.compile(r"\[\[(\d+)\]\]")  # find all annotations
         ann_count = len(pattern.findall(annotated_transcript))
             
         input = prompt_template.format(annotated_transcript)

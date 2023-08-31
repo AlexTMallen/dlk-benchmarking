@@ -3,58 +3,103 @@ from transformers import AutoTokenizer, AutoModel
 import numpy as np
 import torch
 import nltk
+import os
+from tqdm import tqdm
+import faiss
+import json
 
 class Retriever:
-    def __init__(self, model_name="BAAI/bge-large-en", device="cuda"):
-        self.device = device
-        self.model_name = model_name
+    def __init__(self, encoder_name="BAAI/bge-small-en", encoder_device="cuda:0", index_device="cpu", use_IVFPQ=True):
+        # TODO: implement reranking
+        self.encoder_device = encoder_device
+        self.index_device = index_device if isinstance(index_device, int) or index_device == "cpu" else int(index_device.split(":")[-1])
+        self.encoder_name = encoder_name
         self.model = None
         self.tokenizer = None
-        self.embeddings = None
-        self.chunks = None
+        self.index = None
+        self.use_IVFPQ = use_IVFPQ
 
         self.load_model()
         self.load_embeddings()
 
     def load_model(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        print("Loading model...", end=" ")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.encoder_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
+        self.model = AutoModel.from_pretrained(self.encoder_name, device_map={"": self.encoder_device})
+        print("done.")
 
     def load_embeddings(self):
-        data = np.load(f"retrieval/wiki_embeddings_{self.model_name.split('/')[-1]}.npy", allow_pickle=True).item()
-        self.chunks = data["texts"]
-        self.embeddings = data["embeddings"]
+        dim = {"BAAI/bge-large-en": 1024, "BAAI/bge-small-en": 384}[self.encoder_name]
+        embeddings_dir = f"retrieval/20230601.en.wiki_embeddings_{self.encoder_name.split('/')[-1]}"
+
+        if self.index_device == "cpu":
+            self.index = faiss.IndexFlatIP(dim)
+        else:                
+            config = faiss.GpuIndexFlatConfig()
+            config.useFloat16 = True
+            config.device = self.index_device
+            self.index = faiss.GpuIndexFlatIP(faiss.StandardGpuResources(), dim, config)
+        
+        if self.use_IVFPQ:
+            print("Training IVFPQ index...", end=" ")
+            nlist = 100  # number of clusters
+            m = 8  # number of subquantizers
+            self.index = faiss.IndexIVFPQ(self.index, dim, nlist, m, 8)
+
+            n_samples = 5
+            files = np.random.choice(os.listdir(embeddings_dir), n_samples)
+            vecs = []
+            for file in files:
+                vecs.append(np.load(os.path.join(embeddings_dir, file)).astype(np.float16))
+            vecs = np.random.shuffle(np.concatenate(vecs))
+            self.index.train(vecs)
+            self.index.nprobe = 10
+            print("done.")
+
+        files = os.listdir(embeddings_dir)
+        # make sure to add keys to index in order
+        files = sorted(files, key=lambda file: int(file.split(".")[0]))
+        for file in tqdm(files, desc="Adding embeddings to index"):
+            vecs = np.load(os.path.join(embeddings_dir, file)).astype(np.float16)
+            self.index.add(vecs)
 
     def embed(self, texts):
         """Embeds a list of texts using the model."""
         encoded_chunks = self.tokenizer(texts, padding=True, truncation=True, return_tensors='pt')
         with torch.no_grad():
-            model_output = self.model(**encoded_chunks.to(self.device))
+            model_output = self.model(**encoded_chunks.to(self.encoder_device))
             # Perform pooling. In this case, cls pooling.
             embeddings = model_output[0][:, 0]
         embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
         return embeddings.cpu().numpy()
     
-    def __call__(self, texts: str, k: int = 1, threshold: float = 0.8) -> list:
+    def __call__(self, text: str, k: int = 1, threshold: float = 0.8) -> list:
         """Retrieves k texts from the dataset that are most similar to the input text.
         Args:
-            texts (str): Text to retrieve similar texts for.
+            text (str): Text to retrieve similar texts for.
             k (int, optional): Maximum number of texts to retrieve.
             threshold (float, optional): Threshold for the cosine similarity.
         Returns:
             List of texts that are most similar to the input text, sorted by similarity.
         """
-        # TODO: use faiss for faster retrieval
-        if type(texts) == str:
-            texts = [texts]
-        embeddings = self.embed(texts)
-        scores = np.dot(self.embeddings, embeddings.T)
-        best_indices = np.argpartition(scores, -k, axis=0)[-k:]
-        best_scores = scores[best_indices, np.arange(scores.shape[1])]
-        best_indices = best_indices[best_scores > threshold]
-        return self.chunks[best_indices]
+        embeddings = self.embed([text])
+        scores, indices = self.index.search(embeddings, k)
+        scores, indices = scores[0], indices[0]
+        indices = indices[scores > threshold]
+        scores = scores[scores > threshold]
+        retr_texts = [self.get_chunk(i) for i in indices]
+        return retr_texts, scores
+    
+    def get_chunk(self, i: int) -> str:
+        """Returns the text at index i from the dataset of wikipedia chunks."""
+        batch_size = 200_000
+        remainder = i % batch_size
+        fname = f"{i - remainder}.json"
+        with open(os.path.join("retrieval/wiki_chunks", fname)) as f:
+            text = json.load(f)[remainder]
+        return text
     
     @staticmethod
     def trim_chunk(chunk):
