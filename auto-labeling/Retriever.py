@@ -124,3 +124,9 @@ class Retriever:
         except ValueError:
             pass
         return chunk.strip()
+    
+    def get_metadata(self):
+        return {
+            "encoder_name": self.encoder_name,
+            "use_IVF": self.use_IVF,
+        }

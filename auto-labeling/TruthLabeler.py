@@ -132,7 +132,7 @@ class TruthLabeler:
                 print("Error completing request:", e)
                 time.sleep(2)
         
-    def label_example(self, i, id, annotated_transcript, retrieval_query, results, num_tries=5, use_retrieval=False):
+    def label_example(self, id, annotated_transcript, retrieval_query, results, num_tries=5, use_retrieval=False):
         retrieved_text = "...\n...".join(self.retriever(retrieval_query)[0]) if use_retrieval else None
         input, ann_count = TruthLabeler.make_input(annotated_transcript, retrieved_text)
         if ann_count == 0:
@@ -174,7 +174,7 @@ class TruthLabeler:
 
         # Do retreival if more than half of the responses say they need wikipedia
         if num_need_wiki / len(completion["choices"]) > 0.5 and not use_retrieval:
-            self.label_example(i, id, annotated_transcript, retrieval_query, results, num_tries=num_tries, use_retrieval=True)
+            self.label_example(id, annotated_transcript, retrieval_query, results, num_tries=num_tries, use_retrieval=True)
             # TODO: return, but for now let's not return because we want to see the effect of retrieval
 
         if len(score_samples) == 0:
@@ -187,7 +187,6 @@ class TruthLabeler:
         p_trues = [self.aggregate_sample_scores(scores, "p_true") for scores in score_samples]
         
         result = {
-            "idx": i,
             "message_id": id,
             "input": input,
             "annotated_transcript": annotated_transcript,
@@ -222,7 +221,7 @@ class TruthLabeler:
             threads = []
             for _ in range(n_threads):
                 i, args = next(iterator)
-                t = threading.Thread(target=self.label_example, args=(i, *args, results))
+                t = threading.Thread(target=self.label_example, args=(*args, results))
                 threads.append(t)
                 t.start()
 
@@ -240,13 +239,11 @@ class TruthLabeler:
             print(f"Total cost: ${self.total_cost:.4f}")
             if (i + 1) % 200 == 0 or i == n_iters - 1:
                 out_df = pd.DataFrame(list(results.queue))
-                out_df = out_df.sort_values("idx")
                 out_df.to_json(f"data/checkpoints/{self.model_name}_{i + 1}.json")
             if i == n_iters - 1:
                 break
             
         out_df = pd.DataFrame(list(results.queue))
-        out_df = out_df.sort_values("idx")
         return out_df
 
     @staticmethod   
@@ -279,3 +276,23 @@ class TruthLabeler:
             return
 
         return scores
+    
+
+    def get_metadata(self):
+        return {
+            "model_name": self.model_name,
+            "temperature": self.temperature,
+            "n_samples": self.n_samples,
+            "uncertainty_bias": self.uncertainty_bias,
+            "na_bias": self.na_bias,
+            "score_to_p_apt": self.score_to_p_apt,
+            "score_to_p_true": self.score_to_p_true,
+            "stop_seq": self.stop_seq,
+            "total_cost": self.total_cost,
+            "system_prompt": SYSTEM_PROMPT,
+            "prompt_template": PROMPT_TEMPLATE,
+            "retrieval_prompt_template": RETRIEVAL_PROMPT_TEMPLATE,
+            "score_list_template": SCORE_LIST_TEMPLATE,
+            "options": OPTIONS,
+            **self.retriever.get_metadata(),
+        }
