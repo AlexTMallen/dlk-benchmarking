@@ -1,11 +1,43 @@
 import re
 from collections import defaultdict
+import pandas as pd
+
+def get_val_scores(val_path="data/label-validation/combined_validation.txt"):
+    with open(val_path) as f:
+        val_text = f.read()
+
+    message_ids = []
+    scores = []
+    mid_prefix = "[[MESSAGE_ID]] "
+    for chunk in val_text.split(mid_prefix)[1:]:
+        message_ids.append(chunk[:chunk.index("\n")].strip())
+        score_list = []
+        for line in chunk.split("\n"):
+            score_pattern = "]] Score: "
+            if score_pattern in line:
+                score_text = line[line.index(score_pattern) + len(score_pattern):]
+                if "#" in score_text:
+                    score_text = score_text[:score_text.index("#")]
+                score_list.append(score_text.strip())
+        scores.append(score_list)
+    return message_ids, scores
+
+
+def make_transcript(row):
+    prev_messages = row["prev_messages"]
+    role_texts = ["USER: ", "ASSISTANT: "]
+    text = role_texts[1] + row["assistant_text"]
+    for i, message in enumerate(prev_messages[::-1]):
+        text = role_texts[i % 2] + message + "\n\n" + text
+    return text
+
 
 # split the text into conversations, stripping each of right whitespace and starting at "USER:"
 def split_convs(text):
     convs = text.split("\n\nMESSAGE ")
     convs = [c[c.index("\n\nPROMPTER:"):].strip() for c in convs]
     return convs
+
 
 def get_prompter_texts(text):
     convs = split_convs(text)
@@ -19,6 +51,7 @@ def get_prompter_texts(text):
         prompter_texts.append(conv)
     return prompter_texts
         
+
 def get_assistant_texts(text):
     convs = split_convs(text)
     assistant_texts = []
@@ -29,6 +62,7 @@ def get_assistant_texts(text):
         assistant_texts.append(t)
     return assistant_texts
 
+
 def get_message_ids(text):
     # e.g. MESSAGE 60cee540-2198-4ebd-8758-c4fd36a6d9e1
     convs = text.split("\n\nMESSAGE ")
@@ -37,6 +71,7 @@ def get_message_ids(text):
         prompter_idx = conv.index("\n\nPROMPTER:")
         message_ids.append(conv[:prompter_idx].strip())
     return message_ids
+
 
 def remove_tags(text):
     if type(text) == list:
@@ -52,6 +87,7 @@ def remove_tags(text):
         #     match_text = " " + match_text
         conv_text = conv_text.replace(match_text, "")
     return conv_text
+
 
 def replace_tags(text, to_replace=("LE", "LH", "APT", "NORM", "IMP"), with_tag="[[APT]]"):
     """ Replaces tags with a single tag, by default [[APT]]
@@ -71,6 +107,7 @@ def replace_tags(text, to_replace=("LE", "LH", "APT", "NORM", "IMP"), with_tag="
             conv_text = conv_text.replace(match_text, "")
     return conv_text
 
+
 def get_tags(text):
     """ Returns a dict of tag: [list of string indices into clean text where tag occurs] """
     if type(text) == list:
@@ -86,6 +123,7 @@ def get_tags(text):
             tags[tag].append(match.start() - cumulative_offset)
         cumulative_offset += len(match_text)  # so that results are indices into the clean text
     return tags
+
 
 def get_tag_masks(text):
     """ Returns a dict of tag: [list of 1s and 0s of length len(text), where 1 indicates a tag] """

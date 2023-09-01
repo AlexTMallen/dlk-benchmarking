@@ -9,7 +9,7 @@ import faiss
 import json
 
 class Retriever:
-    def __init__(self, encoder_name="BAAI/bge-small-en", encoder_device="cuda:0", index_device="cpu", use_IVFPQ=True):
+    def __init__(self, encoder_name="BAAI/bge-small-en", encoder_device="cuda:0", index_device="cpu", use_IVF=True, pretrained_index_path=None):
         # TODO: implement reranking
         self.encoder_device = encoder_device
         self.index_device = index_device if isinstance(index_device, int) or index_device == "cpu" else int(index_device.split(":")[-1])
@@ -17,10 +17,16 @@ class Retriever:
         self.model = None
         self.tokenizer = None
         self.index = None
-        self.use_IVFPQ = use_IVFPQ
+        self.use_IVF = use_IVF
+        self.pretrained_index_path = pretrained_index_path
 
         self.load_model()
-        self.load_embeddings()
+        if self.pretrained_index_path is not None:
+            print("Loading pretrained index...", end=" ")
+            self.index = faiss.read_index(self.pretrained_index_path)
+            print("done.")
+        else:
+            self.load_embeddings()
 
     def load_model(self):
         print("Loading model...", end=" ")
@@ -42,20 +48,20 @@ class Retriever:
             config.device = self.index_device
             self.index = faiss.GpuIndexFlatIP(faiss.StandardGpuResources(), dim, config)
         
-        if self.use_IVFPQ:
-            print("Training IVFPQ index...", end=" ")
+        if self.use_IVF:
+            print("Training IVF index...", end=" ")
             nlist = 100  # number of clusters
-            m = 8  # number of subquantizers
-            self.index = faiss.IndexIVFPQ(self.index, dim, nlist, m, 8)
+            self.index = faiss.IndexIVFFlat(self.index, dim, nlist)
 
             n_samples = 5
             files = np.random.choice(os.listdir(embeddings_dir), n_samples)
             vecs = []
             for file in files:
                 vecs.append(np.load(os.path.join(embeddings_dir, file)).astype(np.float16))
-            vecs = np.random.shuffle(np.concatenate(vecs))
+            vecs = np.concatenate(vecs)
+            np.random.shuffle(vecs)
             self.index.train(vecs)
-            self.index.nprobe = 10
+            self.index.nprobe = 5
             print("done.")
 
         files = os.listdir(embeddings_dir)
