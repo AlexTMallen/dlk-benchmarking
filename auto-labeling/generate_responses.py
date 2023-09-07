@@ -11,13 +11,18 @@ VICUNA_PREFIX = "A chat between a curious human and an artificial intelligence a
                 "The assistant gives helpful, detailed, and polite answers to the human's questions."
 
 
-def main(model_name, device):
+def main(model_name, device, ds="oasst"):
     # load dataset from local jsonl
-    path = "data/oasst/2023-04-12_oasst_all.messages.jsonl"
-    # path = "data/alpaca_data.json"
-
-
-    df = pd.read_json(path, lines=True)
+    if ds == "oasst":
+        path = "data/oasst/2023-04-12_oasst_all.messages.jsonl"
+        df = pd.read_json(path, lines=True)
+        df = df[(df["role"] == "prompter") & (df["lang"] == "en")]
+    elif ds == "alpaca":
+        path = "data/alpaca_data.json"
+        df = pd.read_json(path)
+        df["id"] = ["alpaca-" + str(i) for i in range(len(df))]
+    else:
+        raise ValueError("Invalid dataset")
     
     # load model
     tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=False)
@@ -28,8 +33,7 @@ def main(model_name, device):
     if "pythia" in model_name:
         model = model.half()
     model.eval()
-    prompter_df = df[(df["role"] == "prompter") & (df["lang"] == "en")]
-    prompter_df.head()
+    
     # tokenizer.eos_token = "### End"
     tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
     print(tokenizer.eos_token_id)
@@ -46,12 +50,9 @@ def main(model_name, device):
     n_examples = 6000
     offset = 1000
     with torch.no_grad():
-        shuffled_df = prompter_df.sample(frac=1, random_state=633)
+        shuffled_df = df.sample(frac=1, random_state=633)
         for i, row in tqdm(enumerate(shuffled_df.iloc[offset:offset + n_examples].iloc), total=n_examples):
             print(f"\n\n\n####################################  {i}  ##############################################\n\n")
-            pid = row["parent_id"]
-    
-            parent_text = row["text"]
             prefix = {"keyfan/bloomz-rlhf": VICUNA_PREFIX + " ",
                     "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "",
                     "lmsys/vicuna-7b-v1.5": VICUNA_PREFIX + "\n\n"}[model_name]
@@ -60,22 +61,37 @@ def main(model_name, device):
                             "lmsys/vicuna-7b-v1.5": "USER: {}</s>\n"}[model_name]
             assistant_prefix = {"keyfan/bloomz-rlhf": "ASSISTANT:", "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|assistant|>",
                                 "lmsys/vicuna-7b-v1.5": "ASSISTANT:"}[model_name]
+            if ds == "oasst":
+                pid = row["parent_id"]
+                current_id = row["message_id"]
+        
 
-            role_text = prompter_template if row["role"] == "prompter" else assistant_prefix
-            texts = [role_text + row["text"]]
-            prev_messages = [row["text"]]
-            while not pd.isnull(pid):
-                parent = df[df["message_id"] == pid].iloc[0]
                 role_text = prompter_template.format(parent["text"]) if parent["role"] == "prompter" \
-                    else assistant_prefix + " " + parent["text"]  # TODO: this adds an extra space for OASST
-                texts.append(role_text)
-                pid = parent["parent_id"]
-                prev_messages.append(parent["text"])
-            
+                        else assistant_prefix + " " + parent["text"]  # TODO: this adds an extra space for OASST
+                texts = [role_text]
+                prev_messages = [row["text"]]
+                while not pd.isnull(pid):
+                    parent = df[df["message_id"] == pid].iloc[0]
+                    role_text = prompter_template.format(parent["text"]) if parent["role"] == "prompter" \
+                        else assistant_prefix + " " + parent["text"]  # TODO: this adds an extra space for OASST
+                    texts.append(role_text)
+                    pid = parent["parent_id"]
+                    prev_messages.append(parent["text"])
+                
 
-            texts.reverse()
-            prev_messages.reverse()
-            prompt = prefix + "".join(texts) + assistant_prefix
+                texts.reverse()
+                prev_messages.reverse()
+                prompt = prefix + "".join(texts) + assistant_prefix
+            elif ds == "alpaca":
+                current_id = row["id"]
+                if row["input"] == "":
+                    user_message = row["instruction"]
+                else:
+                    user_message = row["instruction"] + "\n\n" + row["input"]
+                prev_messages = [user_message]
+                prompt = prefix + prompter_template.format(user_message) + assistant_prefix
+            else:
+                raise ValueError("Invalid dataset")
 
             inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
             if len(inputs["input_ids"][0]) > max_length - 256:
@@ -100,20 +116,20 @@ def main(model_name, device):
                 "message_id": str(uuid.uuid4()),
                 "prompt": prompt,
                 "assistant_text": response,
-                "parent_id": row["message_id"],
-                "parent_text": parent_text,
+                "parent_id": current_id,
                 "prev_messages": prev_messages,
                 "role": "assistant",
                 "synthetic": True,
-                "model": f"{model_name}({gen_kwargs_str})"
+                "model": f"{model_name}({gen_kwargs_str})",
+                "base_dataset": ds,
             })
 
             step = 50
             if len(results) % step == 0 or i == n_examples - 1:
                 results_df = pd.DataFrame.from_dict(results)
                 model_str = model_name.replace("/", "_")
-                results_df.to_json(f"data/oasst/generated_responses/{len(results)}_transcripts_{model_str}({gen_kwargs_str}).json", orient="records")
-                prev_file = f"data/oasst/generated_responses/{len(results) - step}_transcripts_{model_str}({gen_kwargs_str}).json"
+                results_df.to_json(f"data/oasst/generated_responses/{len(results)}_transcripts_{ds}_{model_str}({gen_kwargs_str}).json", orient="records")
+                prev_file = f"data/oasst/generated_responses/{len(results) - step}_transcripts_{ds}_{model_str}({gen_kwargs_str}).json"
                 if os.path.exists(prev_file):
                     os.remove(prev_file)
 
@@ -121,5 +137,6 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--model_name", type=str, default="OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5")
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--dataset", type=str, default="oasst")
     args = parser.parse_args()
-    main(args.model_name, args.device)
+    main(args.model_name, args.device, args.dataset)
