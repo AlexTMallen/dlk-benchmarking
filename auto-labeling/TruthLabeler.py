@@ -191,6 +191,7 @@ class TruthLabeler:
             "input": input,
             "annotated_transcript": annotated_transcript,
             "retrieval_query": retrieval_query,
+            "retrieved_text": retrieved_text,
             "responses": responses,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

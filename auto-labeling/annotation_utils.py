@@ -2,6 +2,8 @@ import re
 from collections import defaultdict
 import pandas as pd
 
+user_prefix = "PROMPTER:"  # TODO: change back to "USER:"
+
 def get_val_scores(val_path="data/label-validation/combined_validation.txt"):
     with open(val_path) as f:
         val_text = f.read()
@@ -26,7 +28,7 @@ def get_val_scores(val_path="data/label-validation/combined_validation.txt"):
 
 def make_transcript(row, annotated=False):
     prev_messages = row["prev_messages"]
-    role_texts = ["USER: ", "ASSISTANT: "]
+    role_texts = [user_prefix + " ", "ASSISTANT: "]
     text = role_texts[1] + row["annotated_assistant_text" if annotated else "assistant_text"]
     for i, message in enumerate(prev_messages[::-1]):
         text = role_texts[i % 2] + message + "\n\n" + text
@@ -36,7 +38,7 @@ def make_transcript(row, annotated=False):
 # split the text into conversations, stripping each of right whitespace and starting at "USER:"
 def split_convs(text):
     convs = text.split("\n\nMESSAGE ")
-    convs = [c[c.index("\n\nUSER:"):].strip() for c in convs]
+    convs = [c[c.index(f"\n\n{user_prefix}"):].strip() for c in convs]
     return convs
 
 
@@ -44,7 +46,7 @@ def get_prompter_texts(text):
     convs = split_convs(text)
     prompter_texts = []
     for conv in convs:
-        conv = conv.removeprefix("USER:")
+        conv = conv.removeprefix(user_prefix)
         end_loc = conv.index("\n\nASSISTANT:")
         if end_loc == -1:
             raise ValueError(f"No assistant text found in conversation: {conv}")
@@ -69,7 +71,8 @@ def get_message_ids(text):
     convs = text.split("\n\nMESSAGE ")
     message_ids = []
     for conv in convs:
-        prompter_idx = conv.index("\n\nUSER:")
+        conv = conv.removeprefix("MESSAGE ")
+        prompter_idx = conv.index(f"\n\n{user_prefix}")
         message_ids.append(conv[:prompter_idx].strip())
     return message_ids
 
