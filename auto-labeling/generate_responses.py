@@ -15,8 +15,8 @@ def main(model_name, device, ds="oasst"):
     # load dataset from local jsonl
     if ds == "oasst":
         path = "data/oasst/2023-04-12_oasst_all.messages.jsonl"
-        df = pd.read_json(path, lines=True)
-        df = df[(df["role"] == "prompter") & (df["lang"] == "en")]
+        full_df = pd.read_json(path, lines=True)
+        df = full_df[(full_df["role"] == "prompter") & (full_df["lang"] == "en")]
     elif ds == "alpaca":
         path = "data/alpaca_data.json"
         df = pd.read_json(path)
@@ -58,22 +58,24 @@ def main(model_name, device, ds="oasst"):
                     "lmsys/vicuna-7b-v1.5": VICUNA_PREFIX + "\n\n"}[model_name]
             
             prompter_template = {"keyfan/bloomz-rlhf": "USER: {}\n", "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|prompter|>{}<|endoftext|>",
-                            "lmsys/vicuna-7b-v1.5": "USER: {}</s>\n"}[model_name]
+                            "lmsys/vicuna-7b-v1.5": "USER: {}\n"}[model_name]
             assistant_prefix = {"keyfan/bloomz-rlhf": "ASSISTANT:", "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|assistant|>",
                                 "lmsys/vicuna-7b-v1.5": "ASSISTANT:"}[model_name]
+            assistant_template = {"keyfan/bloomz-rlhf": "ASSISTANT: {}\n",
+                                  "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|assistant|>{}<|endoftext|>",
+                                  "lmsys/vicuna-7b-v1.5": "ASSISTANT: {}</s>\n"}[model_name]
             if ds == "oasst":
                 pid = row["parent_id"]
                 current_id = row["message_id"]
         
-
-                role_text = prompter_template.format(parent["text"]) if parent["role"] == "prompter" \
-                        else assistant_prefix + " " + parent["text"]  # TODO: this adds an extra space for OASST
+                role_text = prompter_template.format(row["text"]) if row["role"] == "prompter" \
+                        else assistant_template.format(row["text"])
                 texts = [role_text]
                 prev_messages = [row["text"]]
                 while not pd.isnull(pid):
-                    parent = df[df["message_id"] == pid].iloc[0]
+                    parent = full_df[full_df["message_id"] == pid].iloc[0]
                     role_text = prompter_template.format(parent["text"]) if parent["role"] == "prompter" \
-                        else assistant_prefix + " " + parent["text"]  # TODO: this adds an extra space for OASST
+                        else assistant_template.format(parent["text"])
                     texts.append(role_text)
                     pid = parent["parent_id"]
                     prev_messages.append(parent["text"])
