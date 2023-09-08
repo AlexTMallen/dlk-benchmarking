@@ -29,9 +29,8 @@ def main(model_name, device, ds="oasst"):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = AutoModelForCausalLM.from_pretrained(model_name, device_map={"": device})
-    if "pythia" in model_name:
-        model = model.half()
+        
+    model = AutoModelForCausalLM.from_pretrained(model_name, device_map={"": device}, torch_dtype=torch.float16)
     model.eval()
     
     # tokenizer.eos_token = "### End"
@@ -55,15 +54,17 @@ def main(model_name, device, ds="oasst"):
             print(f"\n\n\n####################################  {i}  ##############################################\n\n")
             prefix = {"keyfan/bloomz-rlhf": VICUNA_PREFIX + " ",
                     "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "",
-                    "lmsys/vicuna-7b-v1.5": VICUNA_PREFIX + "\n\n"}[model_name]
+                    "lmsys/vicuna-7b-v1.5": VICUNA_PREFIX + "\n\n",
+                    "WizardLM/WizardLM-13B-V1.2": VICUNA_PREFIX + " "}[model_name]
             
             prompter_template = {"keyfan/bloomz-rlhf": "USER: {}\n", "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|prompter|>{}<|endoftext|>",
-                            "lmsys/vicuna-7b-v1.5": "USER: {}\n"}[model_name]
+                            "lmsys/vicuna-7b-v1.5": "USER: {}\n", "WizardLM/WizardLM-13B-V1.2": "USER: {} "}[model_name]
             assistant_prefix = {"keyfan/bloomz-rlhf": "ASSISTANT:", "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|assistant|>",
-                                "lmsys/vicuna-7b-v1.5": "ASSISTANT:"}[model_name]
+                                "lmsys/vicuna-7b-v1.5": "ASSISTANT:", "WizardLM/WizardLM-13B-V1.2": "ASSISTANT:"}[model_name]
             assistant_template = {"keyfan/bloomz-rlhf": "ASSISTANT: {}\n",
                                   "OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5": "<|assistant|>{}<|endoftext|>",
-                                  "lmsys/vicuna-7b-v1.5": "ASSISTANT: {}</s>\n"}[model_name]
+                                  "lmsys/vicuna-7b-v1.5": "ASSISTANT: {}</s>\n",
+                                  "WizardLM/WizardLM-13B-V1.2": "ASSISTANT {}</s>"}[model_name]
             if ds == "oasst":
                 pid = row["parent_id"]
                 current_id = row["message_id"]
@@ -79,7 +80,6 @@ def main(model_name, device, ds="oasst"):
                     texts.append(role_text)
                     pid = parent["parent_id"]
                     prev_messages.append(parent["text"])
-                
 
                 texts.reverse()
                 prev_messages.reverse()
@@ -137,7 +137,7 @@ def main(model_name, device, ds="oasst"):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5")
+    parser.add_argument("--model_name", type=str, default="WizardLM/WizardLM-13B-V1.2")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dataset", type=str, default="oasst")
     args = parser.parse_args()
