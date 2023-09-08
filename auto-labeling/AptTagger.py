@@ -59,8 +59,16 @@ class AptTagger:
         bits = []
         num_apt = 0
         for i, c in enumerate(text):
-            bits.append(c)
+            if c == ")" and mask[i] != 1 and i != 0 and mask[i - 1] == 1:
+                # if the previous char tag comes right before a closing paren, move it outside,
+                # unless there is another tag right after the closing paren
+                # NOTE: This is a hack, otherwise LMs get confused what span the tag is for
+                bits.insert(-1, c)  # insert ")" before the last apt tag
+            else:
+                bits.append(c)
+                
             if mask[i] == 1:
                 num_apt += 1
+                
                 bits.append(f"[[{num_apt}]]")
         return "".join(bits)
